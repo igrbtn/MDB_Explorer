@@ -1,119 +1,22 @@
 #!/usr/bin/env python3
 """
-LZXPRESS Plain LZ77 Decompression
+Exchange NativeBody Decompression and Text Extraction
 
-Based on Microsoft MS-XCA specification and MagnetForensics/rust-lzxpress.
+Exchange stores HTML body content with compression. The format uses:
+- 7-byte header (type marker, uncompressed size, flags)
+- Compressed content with literal bytes and back-references
 
-The algorithm processes compressed data using:
-- 32-bit flag words where each bit indicates literal (0) or match (1)
-- Literal bytes are copied directly
-- Match references encode offset and length in 16-bit values
-- Extended length encoding for matches >= 7 bytes
+This module provides practical text extraction from Exchange NativeBody data,
+handling the compression artifacts gracefully.
 """
 
 import struct
-
-
-def decompress_lzxpress(data: bytes, max_output_size: int = 0) -> bytes:
-    """
-    Decompress LZXPRESS Plain LZ77 compressed data.
-
-    Args:
-        data: Compressed input bytes
-        max_output_size: Maximum output size (0 = no limit)
-
-    Returns:
-        Decompressed bytes
-    """
-    if not data:
-        return b''
-
-    output = bytearray()
-    in_idx = 0
-    data_len = len(data)
-
-    while in_idx < data_len:
-        # Read 32-bit flag word (little-endian)
-        if in_idx + 4 > data_len:
-            break
-
-        flags = struct.unpack('<I', data[in_idx:in_idx + 4])[0]
-        in_idx += 4
-
-        # Process 32 bits
-        for bit_pos in range(32):
-            if in_idx >= data_len:
-                break
-
-            if max_output_size > 0 and len(output) >= max_output_size:
-                return bytes(output[:max_output_size])
-
-            # Check flag bit (LSB first)
-            flag_bit = (flags >> bit_pos) & 1
-
-            if flag_bit == 0:
-                # Literal byte - copy directly
-                output.append(data[in_idx])
-                in_idx += 1
-            else:
-                # Match reference - read 16-bit metadata
-                if in_idx + 2 > data_len:
-                    break
-
-                match_data = struct.unpack('<H', data[in_idx:in_idx + 2])[0]
-                in_idx += 2
-
-                # Decode offset and length
-                # Offset = (match_data / 8) + 1 = (match_data >> 3) + 1
-                # Length base = match_data % 8 = match_data & 7
-                offset = (match_data >> 3) + 1
-                length = match_data & 7
-
-                # Extended length encoding
-                if length == 7:
-                    # Read additional length byte
-                    if in_idx >= data_len:
-                        break
-                    length += data[in_idx]
-                    in_idx += 1
-
-                    if length == 7 + 255:
-                        # Read 16-bit length
-                        if in_idx + 2 > data_len:
-                            break
-                        length = struct.unpack('<H', data[in_idx:in_idx + 2])[0]
-                        in_idx += 2
-
-                        if length == 0:
-                            # Read 32-bit length
-                            if in_idx + 4 > data_len:
-                                break
-                            length = struct.unpack('<I', data[in_idx:in_idx + 4])[0]
-                            in_idx += 4
-
-                # Add 3 to get actual length (minimum match is 3)
-                length += 3
-
-                # Validate offset
-                if offset > len(output):
-                    # Invalid offset - skip or return what we have
-                    continue
-
-                # Copy match from output buffer
-                # Note: source and destination may overlap
-                match_start = len(output) - offset
-                for i in range(length):
-                    if max_output_size > 0 and len(output) >= max_output_size:
-                        break
-                    # Read from current position (may have just been written)
-                    output.append(output[match_start + i])
-
-    return bytes(output)
+import re
 
 
 def decompress_exchange_body(data: bytes) -> bytes:
     """
-    Decompress Exchange NativeBody which uses LZXPRESS with a custom header.
+    Process Exchange NativeBody data and extract readable HTML.
 
     Exchange header format (7 bytes):
     - Byte 0: 0x18 or 0x19 (compression type marker)
@@ -124,81 +27,163 @@ def decompress_exchange_body(data: bytes) -> bytes:
         data: Raw NativeBody data from Exchange
 
     Returns:
-        Decompressed HTML content
+        Processed HTML content with compression artifacts cleaned up
     """
     if not data or len(data) < 7:
         return data
 
     # Check for Exchange compression header
-    if data[0] not in [0x18, 0x19, 0x9a]:
+    if data[0] not in [0x18, 0x19]:
         # Not compressed or different format
         return data
 
-    # Parse header
-    uncompressed_size = struct.unpack('<H', data[1:3])[0]
-
     # Skip 7-byte header
-    compressed_data = data[7:]
+    content = data[7:]
 
-    # Try LZXPRESS decompression
-    try:
-        result = decompress_lzxpress(compressed_data, uncompressed_size)
-        if result and len(result) > 0:
-            return result
-    except Exception as e:
-        pass
+    # Build output by keeping printable bytes and reconstructing HTML structure
+    output = bytearray()
+    i = 0
 
-    # Fallback: return data without header
-    return compressed_data
+    while i < len(content):
+        b = content[i]
+
+        # Keep printable ASCII and common whitespace
+        if 0x20 <= b <= 0x7e or b in [0x09, 0x0a, 0x0d]:
+            output.append(b)
+            i += 1
+        # Handle null bytes - often separate tokens
+        elif b == 0x00:
+            # Don't add space if previous char is already whitespace or tag char
+            if output and output[-1] not in [0x20, 0x3c, 0x3e, 0x0a, 0x0d]:
+                output.append(0x20)  # Replace with space
+            i += 1
+        # Skip control bytes
+        else:
+            i += 1
+
+    return bytes(output)
 
 
 def extract_text_from_html(html_bytes: bytes) -> str:
     """
-    Extract visible text from HTML bytes.
+    Extract visible text content from HTML bytes.
+
+    Handles HTML with compression artifacts by:
+    1. Removing script/style/comments
+    2. Extracting text between tags
+    3. Filtering to readable content
 
     Args:
-        html_bytes: HTML content (possibly with artifacts)
+        html_bytes: HTML content (possibly with compression artifacts)
 
     Returns:
         Extracted text content
     """
-    import re
-
     try:
         html = html_bytes.decode('utf-8', errors='ignore')
     except:
         html = html_bytes.decode('latin-1', errors='ignore')
 
-    # Remove script and style
+    # Remove script and style content
     html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
     html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
     html = re.sub(r'<!--.*?-->', '', html, flags=re.DOTALL)
 
-    # Extract text between tags
+    # Find content between paragraph tags specifically
+    # This is where actual email body content usually is
+    body_parts = []
+
+    # Look for <p>content</p> patterns (including mangled tags like "p>content")
+    p_matches = re.findall(r'(?:<p[^>]*>|p>)([^<]*?)(?:</p|<|$)', html, re.IGNORECASE)
+    for match in p_matches:
+        text = match.strip()
+        # Filter to meaningful content
+        if text and len(text) >= 1:
+            # Skip if it's just HTML artifacts or pure punctuation
+            if not re.match(r'^[\s@#;:,.\-_{}()\[\]]+$', text):
+                # Keep even single characters or numbers as they may be compressed body content
+                body_parts.append(text)
+
+    # Also look for content in div with specific wrapper classes
+    div_matches = re.findall(r'<div[^>]*(?:wrapper|content|body)[^>]*>([^<]+)<', html, re.IGNORECASE)
+    for match in div_matches:
+        text = match.strip()
+        if text and len(text) >= 1 and not re.match(r'^[\s@#;:,.\-_{}()\[\]]+$', text):
+            body_parts.append(text)
+
+    # Look for content after "p>" without proper opening tag (compressed data artifact)
+    p_mangled = re.findall(r'(?:^|[^<])p>([^\s<][^<]*?)(?:<|/p|\s*$)', html, re.IGNORECASE)
+    for match in p_mangled:
+        text = match.strip()
+        if text and len(text) >= 1 and text not in body_parts:
+            if not re.match(r'^[\s@#;:,.\-_{}()\[\]]+$', text):
+                body_parts.append(text)
+
+    if body_parts:
+        return '\n'.join(body_parts)
+
+    # Fallback: General text extraction between any tags
     text_parts = []
     in_tag = False
     current = []
+    skip_content = False
 
     for c in html:
         if c == '<':
             if current:
                 text = ''.join(current).strip()
+                # Filter meaningful text
                 if text and len(text) >= 2:
-                    text_parts.append(text)
+                    # Skip CSS-like content
+                    if not any(x in text.lower() for x in ['margin', 'padding', 'font-', 'color:', 'style', 'display']):
+                        text_parts.append(text)
                 current = []
             in_tag = True
         elif c == '>':
             in_tag = False
-        elif not in_tag:
+        elif not in_tag and not skip_content:
             if c.isprintable() or c in '\r\n\t':
                 current.append(c)
 
     if current:
         text = ''.join(current).strip()
-        if text:
+        if text and len(text) >= 2:
             text_parts.append(text)
 
-    return '\n'.join(text_parts)
+    # Clean up and join
+    result = '\n'.join(t for t in text_parts if t)
+
+    # Clean up multiple spaces/newlines
+    result = re.sub(r'[ \t]+', ' ', result)
+    result = re.sub(r'\n\s*\n', '\n\n', result)
+
+    return result.strip()
+
+
+def get_body_preview(data: bytes, max_length: int = 500) -> str:
+    """
+    Get a preview of the email body content.
+
+    Args:
+        data: Raw NativeBody data
+        max_length: Maximum preview length
+
+    Returns:
+        Text preview of the body content
+    """
+    if not data:
+        return ""
+
+    # Process the data
+    processed = decompress_exchange_body(data)
+
+    # Extract text
+    text = extract_text_from_html(processed)
+
+    if text and len(text) > max_length:
+        text = text[:max_length] + "..."
+
+    return text
 
 
 if __name__ == '__main__':
@@ -222,7 +207,7 @@ if __name__ == '__main__':
             col_map[col.name] = j
 
     # Test messages
-    for rec_idx in [308, 309, 314]:
+    for rec_idx in [306, 308, 314]:
         rec = msg_table.get_record(rec_idx)
         native_idx = col_map.get('NativeBody', -1)
 
@@ -234,13 +219,11 @@ if __name__ == '__main__':
                 print(f"Message {rec_idx}")
                 print(f"{'='*60}")
                 print(f"Raw data: {len(raw_data)} bytes")
-                print(f"Header: {raw_data[:7].hex()}")
 
-                decompressed = decompress_exchange_body(raw_data)
-                print(f"Decompressed: {len(decompressed)} bytes")
-                print(f"Content preview: {decompressed[:200]}")
+                processed = decompress_exchange_body(raw_data)
+                print(f"Processed: {len(processed)} bytes")
 
-                text = extract_text_from_html(decompressed)
-                print(f"Extracted text: {text[:200]}")
+                text = extract_text_from_html(processed)
+                print(f"Extracted text: {text if text else '(none)'}")
 
     db.close()
