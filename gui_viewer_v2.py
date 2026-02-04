@@ -73,6 +73,80 @@ except ImportError:
     SPECIAL_FOLDER_MAP = {}
 
 
+# Supported encodings for text extraction
+# ASCII/UTF-8 encodings (for standard text)
+ASCII_ENCODINGS = ['ascii', 'utf-8']
+# Extended encodings (for non-ASCII characters like Cyrillic)
+EXTENDED_ENCODINGS = [
+    'windows-1251',  # Cyrillic (Russian, Bulgarian, Serbian)
+    'koi8-r',        # Cyrillic (Russian)
+    'koi8-u',        # Cyrillic (Ukrainian)
+    'iso-8859-5',    # Cyrillic
+    'windows-1252',  # Western European
+    'iso-8859-1',    # Latin-1
+    'cp866',         # DOS Cyrillic
+]
+
+
+def try_decode(data, encodings=None):
+    """Try to decode bytes using multiple encodings with smart detection."""
+    if not data:
+        return None
+
+    # Check if data is pure ASCII (all bytes < 128)
+    has_high_bytes = any(b >= 128 for b in data)
+
+    if not has_high_bytes:
+        # Pure ASCII - decode as ASCII or UTF-8
+        try:
+            return data.decode('ascii').rstrip('\x00')
+        except UnicodeDecodeError:
+            try:
+                return data.decode('utf-8').rstrip('\x00')
+            except UnicodeDecodeError:
+                pass
+
+    # Has high bytes - try UTF-8 first (handles multi-byte UTF-8)
+    try:
+        text = data.decode('utf-8')
+        if text:
+            return text.rstrip('\x00')
+    except UnicodeDecodeError:
+        pass
+
+    # Try extended encodings (Cyrillic, etc.) only if there are high bytes
+    if has_high_bytes:
+        if encodings is None:
+            encodings = EXTENDED_ENCODINGS
+
+        for encoding in encodings:
+            try:
+                text = data.decode(encoding)
+                # Check if result is mostly printable
+                printable_count = sum(1 for c in text if c.isprintable() or c.isspace())
+                if printable_count >= len(text) * 0.8:
+                    return text.rstrip('\x00')
+            except (UnicodeDecodeError, LookupError):
+                continue
+
+    # Final fallback - decode with replacement
+    try:
+        return data.decode('utf-8', errors='replace').rstrip('\x00')
+    except:
+        return data.decode('latin-1', errors='replace').rstrip('\x00')
+
+
+def is_printable_extended(b):
+    """Check if byte is printable (including extended ASCII/Cyrillic)."""
+    # ASCII printable
+    if 32 <= b < 127:
+        return True
+    # Extended ASCII (Windows-1251 Cyrillic range, etc.)
+    if 128 <= b <= 255:
+        return True
+    return False
+
+
 def get_column_map(table):
     """Get mapping of column names to indices."""
     col_map = {}
@@ -137,13 +211,15 @@ def extract_subject_from_blob(blob):
             length = blob[i+1]
             if 2 <= length <= 100 and i + 2 + length <= len(blob):
                 potential = blob[i+2:i+2+length]
-                # Check if it's printable ASCII
-                if all(32 <= b < 127 for b in potential):
-                    text = potential.decode('ascii')
-                    # Filter out common non-subject strings
-                    skip_words = ['admin', 'exchange', 'recipient', 'labsith', 'fydib', 'pdlt', 'group', 'index']
-                    if not any(x in text.lower() for x in skip_words):
-                        return text
+                # Check if it's printable (including extended ASCII/Cyrillic)
+                if all(is_printable_extended(b) for b in potential):
+                    # Try multiple encodings
+                    text = try_decode(potential)
+                    if text:
+                        # Filter out common non-subject strings
+                        skip_words = ['admin', 'exchange', 'recipient', 'labsith', 'fydib', 'pdlt', 'group', 'index']
+                        if not any(x in text.lower() for x in skip_words):
+                            return text
     return None
 
 
@@ -379,19 +455,70 @@ def create_eml_content(email_data):
     return msg.as_bytes()
 
 
+def is_encrypted_or_binary(data):
+    """Check if data looks like encrypted/binary content (not readable text)."""
+    if not data or len(data) < 2:
+        return False
+
+    # Count control characters and high-bit bytes
+    control_count = sum(1 for b in data if b < 32 and b not in (9, 10, 13))
+    high_byte_count = sum(1 for b in data if b >= 128)
+    printable_count = sum(1 for b in data if 32 <= b < 127)
+
+    total = len(data)
+
+    # If more than 30% control chars or mixed high-bytes with control chars, likely encrypted
+    if control_count > total * 0.3:
+        return True
+
+    # If has control chars at start (like 0x12) and high bytes, likely encrypted
+    if data[0] < 32 and high_byte_count > 0:
+        return True
+
+    # If less than 50% printable ASCII and not valid UTF-16, likely encrypted
+    if printable_count < total * 0.5:
+        # Check if it could be UTF-16
+        has_null_pattern = len(data) >= 4 and data[1] == 0 and data[3] == 0
+        if not has_null_pattern:
+            return True
+
+    return False
+
+
 def get_string_value(record, col_idx):
-    """Get string value from record."""
+    """Get string value from record with multi-encoding support."""
     if col_idx < 0:
         return ""
     try:
         val = record.get_value_data(col_idx)
         if not val:
             return ""
-        for encoding in ['utf-16-le', 'utf-8', 'ascii']:
+
+        # Check if data is encrypted/binary
+        if is_encrypted_or_binary(val):
+            return ""  # Return empty for encrypted fields
+
+        # Check for UTF-16-LE BOM or pattern (null bytes between ASCII chars)
+        is_likely_utf16 = False
+        if len(val) >= 2:
+            # Check for BOM
+            if val[:2] == b'\xff\xfe':
+                is_likely_utf16 = True
+            # Check for null-byte pattern typical of UTF-16-LE ASCII
+            elif len(val) >= 4 and val[1] == 0 and val[3] == 0 and val[0] != 0 and val[2] != 0:
+                is_likely_utf16 = True
+
+        if is_likely_utf16:
             try:
-                return val.decode(encoding).rstrip('\x00')
+                text = val.decode('utf-16-le').rstrip('\x00')
+                if text and all(c.isprintable() or c.isspace() for c in text):
+                    return text
             except:
-                continue
+                pass
+
+        # Try standard decoding
+        result = try_decode(val)
+        return result if result else ""
     except:
         pass
     return ""
@@ -563,7 +690,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Exchange EDB Content Viewer v2")
-        self.setMinimumSize(1400, 900)
+        self.setMinimumSize(800, 500)
+        self.resize(1200, 700)  # Default size, can be resized smaller
 
         self.db = None
         self.tables = {}
@@ -834,6 +962,19 @@ class MainWindow(QMainWindow):
         self.content_tabs.addTab(self.columns_table, "All Columns")
 
         right_layout.addWidget(self.content_tabs)
+
+        # Export buttons row below content tabs
+        content_export_layout = QHBoxLayout()
+
+        self.export_eml_btn2 = QPushButton("Export Message as EML")
+        self.export_eml_btn2.clicked.connect(self._on_export_eml)
+        self.export_eml_btn2.setEnabled(False)
+        self.export_eml_btn2.setStyleSheet("QPushButton { padding: 8px 16px; font-weight: bold; }")
+        content_export_layout.addWidget(self.export_eml_btn2)
+
+        content_export_layout.addStretch()
+
+        right_layout.addLayout(content_export_layout)
 
         main_splitter.addWidget(right_panel)
         main_splitter.setSizes([250, 400, 600])
@@ -1290,6 +1431,7 @@ class MainWindow(QMainWindow):
         self.message_list.clear()
         self.export_folder_btn.setEnabled(False)
         self.export_eml_btn.setEnabled(False)
+        self.export_eml_btn2.setEnabled(False)
         self.export_attach_btn.setEnabled(False)
 
         items = self.folder_tree.selectedItems()
@@ -1348,25 +1490,44 @@ class MainWindow(QMainWindow):
             if date_received:
                 item.setText(1, date_received.strftime("%Y-%m-%d %H:%M"))
 
-            # Get subject and sender from PropertyBlob
+            # Get subject, sender and email from PropertyBlob
             prop_blob = get_bytes_value(record, col_map.get('PropertyBlob', -1))
-            sender = ""
+            sender_name = ""
             subject = ""
             if prop_blob:
-                sender = extract_sender_from_blob(prop_blob) or ""
+                sender_name = extract_sender_from_blob(prop_blob) or ""
                 subject = extract_subject_from_blob(prop_blob) or ""
+
+            # Validate sender - filter out Message-ID looking strings
+            if sender_name and not is_valid_sender_name(sender_name):
+                sender_name = ""
+
+            # Fallback to mailbox owner if no valid sender
+            if not sender_name and hasattr(self, 'mailbox_owner') and self.mailbox_owner:
+                sender_name = self.mailbox_owner
+
+            # Build sender display with email
+            if sender_name:
+                sender_display = f"{sender_name.lower().replace(' ', '')}@lab.sith.uz"
+            else:
+                sender_display = ""
 
             # Get DisplayTo for recipient
             display_to = get_string_value(record, col_map.get('DisplayTo', -1))
+            # Build recipient email
+            if display_to:
+                recipient_display = f"{display_to.lower().replace(' ', '')}@lab.sith.uz"
+            else:
+                recipient_display = ""
 
             # In Sent Items: show To address in From column (who you sent to)
             # In other folders: show From address (who sent to you)
             if is_sent_items:
-                item.setText(2, display_to or "")  # Show recipient in From column
-                item.setText(3, sender or "")  # Show sender (yourself) in To column
+                item.setText(2, recipient_display)  # Show recipient in From column
+                item.setText(3, sender_display)  # Show sender (yourself) in To column
             else:
-                item.setText(2, sender)  # From
-                item.setText(3, display_to or sender)  # To
+                item.setText(2, sender_display)  # From
+                item.setText(3, recipient_display or sender_display)  # To
             item.setText(4, subject)  # Subject
 
             # Get IsRead
@@ -1411,6 +1572,7 @@ class MainWindow(QMainWindow):
 
         # Enable export button
         self.export_eml_btn.setEnabled(True)
+        self.export_eml_btn2.setEnabled(True)
 
         col_map = {}
         columns = []
@@ -1470,9 +1632,15 @@ class MainWindow(QMainWindow):
 
             # Extract Sender
             sender = extract_sender_from_blob(prop_blob)
+            # Validate sender - filter out Message-ID looking strings
+            if sender and not is_valid_sender_name(sender):
+                sender = None
+            # Fallback to mailbox owner
+            if not sender and hasattr(self, 'mailbox_owner') and self.mailbox_owner:
+                sender = self.mailbox_owner
             if sender:
-                parsed_text += f"From: {sender} <{sender}@lab.sith.uz>\n"
-                parsed_text += f"To: {sender} <{sender}@lab.sith.uz>\n"
+                parsed_text += f"From: {sender} <{sender.lower().replace(' ', '')}@lab.sith.uz>\n"
+                parsed_text += f"To: {sender} <{sender.lower().replace(' ', '')}@lab.sith.uz>\n"
 
             # Extract Message-ID
             msgid = extract_message_id_from_blob(prop_blob)

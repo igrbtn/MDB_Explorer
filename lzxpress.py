@@ -27,6 +27,59 @@ except ImportError:
     HAS_DISSECT = False
     dissect_decompress = None
 
+# Extended encodings for non-ASCII text (Cyrillic, etc.)
+EXTENDED_ENCODINGS = [
+    'windows-1251',  # Cyrillic (Russian, Bulgarian, Serbian)
+    'koi8-r',        # Cyrillic (Russian)
+    'koi8-u',        # Cyrillic (Ukrainian)
+    'iso-8859-5',    # Cyrillic
+    'windows-1252',  # Western European
+    'iso-8859-1',    # Latin-1
+    'cp866',         # DOS Cyrillic
+]
+
+
+def try_decode_bytes(data, encodings=None):
+    """Try to decode bytes using multiple encodings with smart detection."""
+    if not data:
+        return None
+
+    # Check if data is pure ASCII (all bytes < 128)
+    has_high_bytes = any(b >= 128 for b in data)
+
+    if not has_high_bytes:
+        # Pure ASCII - decode as ASCII or UTF-8
+        try:
+            return data.decode('ascii').rstrip('\x00')
+        except UnicodeDecodeError:
+            try:
+                return data.decode('utf-8').rstrip('\x00')
+            except UnicodeDecodeError:
+                pass
+
+    # Has high bytes - try UTF-8 first
+    try:
+        text = data.decode('utf-8')
+        if text:
+            return text.rstrip('\x00')
+    except UnicodeDecodeError:
+        pass
+
+    # Try extended encodings (Cyrillic, etc.)
+    if encodings is None:
+        encodings = EXTENDED_ENCODINGS
+
+    for encoding in encodings:
+        try:
+            text = data.decode(encoding)
+            printable_count = sum(1 for c in text if c.isprintable() or c.isspace())
+            if printable_count >= len(text) * 0.7:
+                return text.rstrip('\x00')
+        except (UnicodeDecodeError, LookupError):
+            continue
+
+    return None
+
 
 def decode_repeat_pattern(data: bytes) -> str:
     """
@@ -1040,10 +1093,14 @@ def extract_text_from_html(html_bytes: bytes) -> str:
     Returns:
         Extracted text content with preserved formatting
     """
-    try:
-        html = html_bytes.decode('utf-8', errors='ignore')
-    except:
-        html = html_bytes.decode('latin-1', errors='ignore')
+    # Try multiple encodings for HTML content
+    html = try_decode_bytes(html_bytes)
+    if not html:
+        # Fallback with error ignoring
+        try:
+            html = html_bytes.decode('utf-8', errors='ignore')
+        except:
+            html = html_bytes.decode('latin-1', errors='ignore')
 
     # Remove script and style content
     html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
