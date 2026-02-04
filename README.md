@@ -321,7 +321,7 @@ Example encoding:
 
 ### NativeBody Compression
 
-HTML body content uses Exchange LZXPRESS compression with the same repeat pattern:
+HTML body content uses Exchange LZXPRESS compression (variant of MS-XCA):
 
 ```
 ┌─────────────────────────────────────────────────┐
@@ -331,12 +331,22 @@ HTML body content uses Exchange LZXPRESS compression with the same repeat patter
 │  │     │ Size (2B)   │ (4 bytes)             │  │
 │  └─────┴─────────────┴───────────────────────┘  │
 ├─────────────────────────────────────────────────┤
-│  Compressed HTML data                           │
-│  - Literal bytes (printable ASCII)              │
-│  - Repeat pattern: char + 00 00 = repeat 4x     │
-│  - Back-references (high-bit control bytes)     │
-│  - LZ77-style offset/length encoding            │
+│  Compressed HTML data using LZXPRESS encoding   │
 └─────────────────────────────────────────────────┘
+
+LZXPRESS Back-Reference Encoding:
+  2-byte token: value = byte1 | (byte2 << 8)
+  offset = (value >> 3) + 1
+  length = (value & 7) + 3
+
+Pattern Recognition (in priority order):
+  1. Control sequence: 00 XX YY 00 (XX,YY < 0x20) - skip
+  2. Repeat pattern: char 00 00 non-null - output char 4x
+  3. High-bit back-ref: 0x80+ YY - apply 2-byte LZXPRESS token
+  4. Low back-ref: XX 00 (XX >= 0x20) - try 1-byte token if valid
+  5. Whitespace: 0x09, 0x0a, 0x0d - literal
+  6. Control bytes: 0x00-0x1f - skip
+  7. Printable: 0x20-0x7e - literal
 
 Decompression implemented in lzxpress.py
 ```

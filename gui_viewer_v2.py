@@ -717,16 +717,29 @@ class MainWindow(QMainWindow):
         self.body_view.setFont(QFont("Arial", 10))
         self.content_tabs.addTab(self.body_view, "Body (Text)")
 
-        # Body HTML tab (rendered)
-        self.body_html_view = QTextEdit()
-        self.body_html_view.setReadOnly(True)
-        self.content_tabs.addTab(self.body_html_view, "Body (HTML)")
+        # Raw Body tab with compressed/uncompressed toggle
+        raw_body_widget = QWidget()
+        raw_body_layout = QVBoxLayout(raw_body_widget)
+        raw_body_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Raw HTML Source tab
-        self.body_source_view = QTextEdit()
-        self.body_source_view.setReadOnly(True)
-        self.body_source_view.setFont(QFont("Consolas", 9))
-        self.content_tabs.addTab(self.body_source_view, "HTML Source")
+        # Toggle for compressed/uncompressed view
+        raw_toggle_layout = QHBoxLayout()
+        self.raw_compressed_cb = QCheckBox("Show Compressed (Raw)")
+        self.raw_compressed_cb.setChecked(True)
+        self.raw_compressed_cb.stateChanged.connect(self._on_raw_toggle_changed)
+        raw_toggle_layout.addWidget(self.raw_compressed_cb)
+        raw_toggle_layout.addStretch()
+        raw_body_layout.addLayout(raw_toggle_layout)
+
+        self.raw_body_view = QTextEdit()
+        self.raw_body_view.setReadOnly(True)
+        self.raw_body_view.setFont(QFont("Consolas", 9))
+        raw_body_layout.addWidget(self.raw_body_view)
+        self.content_tabs.addTab(raw_body_widget, "Raw Body")
+
+        # Store raw data for toggle
+        self.current_raw_body_compressed = None
+        self.current_raw_body_decompressed = None
 
         # Parsed tab
         self.parsed_view = QTextEdit()
@@ -1420,19 +1433,10 @@ class MainWindow(QMainWindow):
 
         # === Body View ===
         body_text = ""
-        raw_html = ""
         body_data_raw = None
+        body_data_decompressed = None
 
-        # Try PropertyBlob first - contains clean body text with M+ markers
-        if HAS_LZXPRESS and prop_blob:
-            try:
-                pb_text = extract_body_from_property_blob(prop_blob)
-                if pb_text and len(pb_text) > 5:
-                    body_text = pb_text
-            except:
-                pass
-
-        # Try NativeBody (Long Value) - contains compressed HTML
+        # Try NativeBody FIRST - it contains the actual HTML body content
         native_body_idx = col_map.get('NativeBody', -1)
         if native_body_idx >= 0:
             try:
@@ -1441,13 +1445,12 @@ class MainWindow(QMainWindow):
                     if lv and hasattr(lv, 'get_data'):
                         body_data_raw = lv.get_data()
                         if body_data_raw:
-                            # Try LZXPRESS decompression if PropertyBlob extraction failed
-                            if HAS_LZXPRESS and not body_text:
+                            # Try LZXPRESS decompression
+                            if HAS_LZXPRESS:
                                 try:
-                                    decompressed = decompress_exchange_body(body_data_raw)
-                                    if decompressed and len(decompressed) > 10:
-                                        raw_html = decompressed.decode('utf-8', errors='ignore')
-                                        body_text = extract_text_from_html(decompressed)
+                                    body_data_decompressed = decompress_exchange_body(body_data_raw)
+                                    if body_data_decompressed and len(body_data_decompressed) > 10:
+                                        body_text = extract_text_from_html(body_data_decompressed)
                                 except Exception as e:
                                     pass  # Fall through to manual extraction
 
@@ -1458,17 +1461,11 @@ class MainWindow(QMainWindow):
                                 if body_data[:2] in [b'\x18\x79', b'\x18\x78', b'\x18\x9a']:
                                     body_data = body_data[7:]
 
-                                # Get raw HTML (with compression artifacts)
-                                if not raw_html:
-                                    raw_html = body_data.decode('latin-1', errors='ignore')
-
                                 # Extract text content between <p> tags
-                                # Look for pattern: >text</p or >text</
                                 p_matches = re.findall(rb'>([^<]{1,500})</p', body_data, re.IGNORECASE)
                                 if p_matches:
                                     text_parts = []
                                     for match in p_matches:
-                                        # Filter to printable ASCII
                                         filtered = bytes(c for c in match if 32 <= c <= 126)
                                         if filtered and len(filtered) > 0:
                                             text_parts.append(filtered.decode('ascii', errors='ignore'))
@@ -1538,35 +1535,16 @@ Exchange compresses HTML body content using LZXPRESS Plain LZ77 format.
 Some highly compressed content (like repeated patterns) may not fully
 decompress.
 
-Check the "Body (HTML)" tab for the raw/decompressed HTML data.
+Check the "Raw Body" tab to see compressed/decompressed data.
 
 To see the original body, export the message as EML and view in an
 email client, or check the original .eml file if available."""
             self.body_view.setPlainText(note)
 
-        # Set Body (HTML) view - render HTML like a browser
-        if raw_html:
-            # Clean up HTML for rendering - remove control characters
-            html_clean = ''.join(c if c.isprintable() or c in '\r\n\t' else ' ' for c in raw_html)
-            # Render as HTML
-            self.body_html_view.setHtml(html_clean)
-            # Also show source in the source view
-            html_source = ''.join(c if c.isprintable() or c in '\r\n\t' else '?' for c in raw_html)
-            self.body_source_view.setPlainText(html_source)
-        elif body_data_raw:
-            # Show hex dump in both views
-            hex_lines = []
-            for i in range(0, min(len(body_data_raw), 1000), 16):
-                chunk = body_data_raw[i:i+16]
-                hex_part = ' '.join(f'{b:02x}' for b in chunk)
-                ascii_part = ''.join(chr(b) if 32 <= b <= 126 else '.' for b in chunk)
-                hex_lines.append(f'{i:04x}: {hex_part:<48} {ascii_part}')
-            hex_text = '\n'.join(hex_lines)
-            self.body_html_view.setPlainText("(No valid HTML - showing hex dump)")
-            self.body_source_view.setPlainText(hex_text)
-        else:
-            self.body_html_view.setPlainText("(No HTML body data)")
-            self.body_source_view.setPlainText("(No HTML body data)")
+        # Store raw body data for toggle view
+        self.current_raw_body_compressed = body_data_raw
+        self.current_raw_body_decompressed = body_data_decompressed
+        self._update_raw_body_view()
 
         # Store for EML export
         self.current_email_data['body_text'] = body_text
@@ -1662,6 +1640,43 @@ email client, or check the original .eml file if available."""
         if self.current_mailbox:
             self._on_folder_selected()
 
+    def _on_raw_toggle_changed(self, state):
+        """Toggle between compressed and decompressed raw body view."""
+        self._update_raw_body_view()
+
+    def _update_raw_body_view(self):
+        """Update the raw body view based on toggle state."""
+        show_compressed = self.raw_compressed_cb.isChecked()
+
+        if show_compressed and self.current_raw_body_compressed:
+            # Show hex dump of compressed data
+            data = self.current_raw_body_compressed
+            text = f"Raw NativeBody (Compressed) - {len(data)} bytes\n{'='*60}\n\n"
+            text += "Header: " + ' '.join(f'{b:02x}' for b in data[:7]) + "\n"
+            if data[0] == 0x18:
+                text += "Type: 0x18 - LZXPRESS compressed HTML\n"
+            elif data[0] == 0x17:
+                text += "Type: 0x17 - Plain/encrypted content\n"
+            elif data[0] == 0x19:
+                text += "Type: 0x19 - LZXPRESS compressed variant\n"
+            text += "\nHex dump:\n"
+            text += self._hexdump(data)
+            self.raw_body_view.setPlainText(text)
+        elif not show_compressed and self.current_raw_body_decompressed:
+            # Show decompressed content
+            data = self.current_raw_body_decompressed
+            text = f"Raw NativeBody (Decompressed) - {len(data)} bytes\n{'='*60}\n\n"
+            # Show as text if mostly printable
+            printable_count = sum(1 for b in data if 32 <= b <= 126 or b in [9, 10, 13])
+            if printable_count > len(data) * 0.7:
+                text += data.decode('utf-8', errors='replace')
+            else:
+                text += "Hex dump:\n"
+                text += self._hexdump(data)
+            self.raw_body_view.setPlainText(text)
+        else:
+            self.raw_body_view.setPlainText("(No raw body data available)")
+
     def _on_refresh(self):
         if self.current_mailbox:
             self._load_folders()
@@ -1733,7 +1748,7 @@ email client, or check the original .eml file if available."""
         # Check if message has attachments
         has_attach = get_bytes_value(record, col_map.get('HasAttachments', -1))
         if not has_attach or has_attach == b'\x00':
-            self.content_tabs.setTabText(6, "Attachments (0)")
+            self.content_tabs.setTabText(5, "Attachments (0)")
             return
 
         # Get SubobjectsBlob for attachment linking
@@ -1745,7 +1760,7 @@ email client, or check the original .eml file if available."""
         attach_table = self.tables.get(attach_table_name)
 
         if not attach_table:
-            self.content_tabs.setTabText(6, "Attachments (0)")
+            self.content_tabs.setTabText(5, "Attachments (0)")
             return
 
         attach_col_map = get_column_map(attach_table)
@@ -1905,7 +1920,7 @@ email client, or check the original .eml file if available."""
                 pass
 
         count = len(self.current_attachments)
-        self.content_tabs.setTabText(6, f"Attachments ({count})")
+        self.content_tabs.setTabText(5, f"Attachments ({count})")
 
         if count > 0:
             self.export_attach_btn.setEnabled(True)
