@@ -21,7 +21,14 @@ from PyQt6.QtWidgets import (
     QListWidgetItem, QCheckBox, QTextBrowser
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl
-from PyQt6.QtGui import QFont, QAction, QTextOption
+from PyQt6.QtGui import QFont, QAction, QTextOption, QColor, QPalette
+
+# Try to import WebEngine for proper HTML rendering
+try:
+    from PyQt6.QtWebEngineWidgets import QWebEngineView
+    HAS_WEBENGINE = True
+except ImportError:
+    HAS_WEBENGINE = False
 
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -732,11 +739,21 @@ class MainWindow(QMainWindow):
         self.body_view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.content_tabs.addTab(self.body_view, "Body (Text)")
 
-        # Body HTML tab - renders HTML like a browser
-        self.html_browser_view = QTextBrowser()
-        self.html_browser_view.setReadOnly(True)
-        self.html_browser_view.setOpenExternalLinks(True)
-        self.html_browser_view.setFont(QFont("Arial", 11))
+        # Body HTML tab - renders HTML like a browser with full CSS/images support
+        if HAS_WEBENGINE:
+            self.html_browser_view = QWebEngineView()
+            # Set white background
+            self.html_browser_view.page().setBackgroundColor(QColor(255, 255, 255))
+        else:
+            # Fallback to QTextBrowser if WebEngine not available
+            self.html_browser_view = QTextBrowser()
+            self.html_browser_view.setReadOnly(True)
+            self.html_browser_view.setOpenExternalLinks(True)
+            self.html_browser_view.setFont(QFont("Arial", 11))
+            # Set white background for fallback
+            palette = self.html_browser_view.palette()
+            palette.setColor(QPalette.ColorRole.Base, QColor(255, 255, 255))
+            self.html_browser_view.setPalette(palette)
         self.content_tabs.addTab(self.html_browser_view, "Body (HTML)")
 
         # HTML Source tab - shows raw HTML code
@@ -1538,11 +1555,36 @@ Check the "HTML Source" tab for raw decompressed HTML.
 Check the "Raw Body" tab to see compressed data."""
             self.body_view.setPlainText(note)
 
-        # Set Body (HTML) view - render HTML like a browser
+        # Set Body (HTML) view - render HTML like a browser with styles/images/links
         if html_source:
-            self.html_browser_view.setHtml(html_source)
+            # Wrap in proper HTML document with white background if not already a full document
+            if not html_source.strip().lower().startswith('<!doctype') and not html_source.strip().lower().startswith('<html'):
+                wrapped_html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+body {{ background-color: white; color: black; font-family: Arial, sans-serif; padding: 10px; }}
+a {{ color: #0066cc; }}
+</style>
+</head>
+<body>
+{html_source}
+</body>
+</html>"""
+                self.html_browser_view.setHtml(wrapped_html)
+            else:
+                # Already a full HTML document, inject white background if needed
+                if 'background' not in html_source.lower():
+                    html_source = html_source.replace('<body', '<body style="background-color: white;"', 1)
+                self.html_browser_view.setHtml(html_source)
         else:
-            self.html_browser_view.setHtml("<p style='color: gray;'>(No HTML content available)</p>")
+            no_content_html = """<!DOCTYPE html>
+<html>
+<head><style>body { background-color: white; color: gray; font-family: Arial, sans-serif; padding: 20px; }</style></head>
+<body><p>(No HTML content available)</p></body>
+</html>"""
+            self.html_browser_view.setHtml(no_content_html)
 
         # Set HTML Source view - show raw HTML code
         if html_source:

@@ -18,6 +18,7 @@ A Python GUI application for viewing and exporting emails from Microsoft Exchang
 ```
 Python 3.8+
 PyQt6
+PyQt6-WebEngine (for HTML rendering with styles/images)
 pyesedb (libesedb-python)
 dissect.esedb (for LZXPRESS decompression)
 ```
@@ -26,11 +27,14 @@ dissect.esedb (for LZXPRESS decompression)
 
 ```bash
 pip install PyQt6
+pip install PyQt6-WebEngine
 pip install libesedb-python
 pip install dissect.esedb
 ```
 
-**Note:** The `dissect.esedb` package provides proper MS-XCA LZXPRESS decompression for Exchange HTML body content. Without it, a fallback decoder is used which may have reduced accuracy.
+**Notes:**
+- The `dissect.esedb` package provides proper MS-XCA LZXPRESS decompression for Exchange HTML body content. Without it, a fallback decoder is used which may have reduced accuracy.
+- The `PyQt6-WebEngine` package enables full HTML rendering with CSS styles, images, and clickable links. Without it, a basic text browser fallback is used.
 
 ## Usage
 
@@ -57,10 +61,10 @@ Or launch without arguments and use the Browse button to select an EDB file.
 │  │   Folder    │  │  Message List   │  │    Content Viewer       │  │
 │  │    Tree     │  │  (From/To/Subj) │  │  ┌─────────────────────┐│  │
 │  │             │  │                 │  │  │ Body (Text)         ││  │
-│  │  - Inbox    │  │  #  Date  From  │  │  │ Body (HTML)         ││  │
-│  │  - Sent     │  │  1  2026  Admin │  │  │ Parsed Data         ││  │
-│  │  - Drafts   │  │  2  2026  User  │  │  │ PropertyBlob (Hex)  ││  │
-│  │  - Deleted  │  │                 │  │  │ ASCII Strings       ││  │
+│  │  - Inbox    │  │  #  Date  From  │  │  │ Body (HTML)*        ││  │
+│  │  - Sent     │  │  1  2026  Admin │  │  │ HTML Source         ││  │
+│  │  - Drafts   │  │  2  2026  User  │  │  │ Raw Body            ││  │
+│  │  - Deleted  │  │                 │  │  │ Parsed Data         ││  │
 │  │  - Calendar │  │                 │  │  │ Attachments         ││  │
 │  │  - Contacts │  │                 │  │  │ All Columns         ││  │
 │  │  ...        │  │                 │  │  └─────────────────────┘│  │
@@ -103,6 +107,9 @@ Or launch without arguments and use the Browse button to select an EDB file.
 | `folder_tree` | QTreeWidget showing folder hierarchy |
 | `message_list` | QTreeWidget showing messages in selected folder |
 | `content_tabs` | QTabWidget with multiple content views |
+| `html_browser_view` | QWebEngineView for HTML rendering (with CSS/images/links) |
+
+*Body (HTML) tab uses QWebEngineView when PyQt6-WebEngine is installed, providing full HTML rendering with styles, images, and clickable links on a white background.
 
 ### Data Flow
 
