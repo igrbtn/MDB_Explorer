@@ -1031,14 +1031,14 @@ def extract_text_from_html(html_bytes: bytes) -> str:
 
     Handles HTML with compression artifacts by:
     1. Removing script/style/comments
-    2. Extracting text between body tags
-    3. Filtering to readable content
+    2. Extracting text from all content tags (div, p, span, etc.)
+    3. Preserving line breaks between block elements
 
     Args:
         html_bytes: HTML content (possibly with compression artifacts)
 
     Returns:
-        Extracted text content
+        Extracted text content with preserved formatting
     """
     try:
         html = html_bytes.decode('utf-8', errors='ignore')
@@ -1050,30 +1050,29 @@ def extract_text_from_html(html_bytes: bytes) -> str:
     html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
     html = re.sub(r'<!--.*?-->', '', html, flags=re.DOTALL)
 
-    # Try to extract text from span/p tags first - most reliable for body content
-    # Look for pattern: >text< where text is the actual content
-    body_text_match = re.search(r'<(?:span|p)[^>]*>([A-Za-z0-9][^<]{2,}?)</(?:span|p)>', html, re.IGNORECASE)
-    if body_text_match:
-        text = body_text_match.group(1).strip()
-        # If we found clean text, use it directly
-        if text and len(text) >= 5 and not any(x in text.lower() for x in ['margin', 'padding', 'font-']):
-            # Clean up any remaining artifacts
-            text = re.sub(r'\s+', ' ', text)
-            return text.strip()
-
-    # Find content between paragraph tags specifically
-    # This is where actual email body content usually is
+    # Collect all text parts with proper ordering
     body_parts = []
 
-    # Look for <span>content</span> (common in Exchange emails)
+    # Extract text from ALL <div> tags (most common in Exchange emails)
+    div_matches = re.findall(r'<div[^>]*>([^<]+)</div>', html, re.IGNORECASE)
+    for match in div_matches:
+        text = match.strip()
+        if text and len(text) >= 1:
+            # Skip CSS-like content
+            if not re.match(r'^[\s@#;:,.\-_{}()\[\]]+$', text):
+                if not any(x in text.lower() for x in ['margin', 'padding', 'font-', 'display:', 'color:']):
+                    body_parts.append(text)
+
+    # Extract text from <span> tags
     span_matches = re.findall(r'<span[^>]*>([^<]+)</span>', html, re.IGNORECASE)
     for match in span_matches:
         text = match.strip()
         if text and len(text) >= 1:
             if not re.match(r'^[\s@#;:,.\-_{}()\[\]]+$', text):
-                body_parts.append(text)
+                if text not in body_parts:
+                    body_parts.append(text)
 
-    # Look for <p>content</p> patterns
+    # Extract text from <p> tags
     p_matches = re.findall(r'<p[^>]*>([^<]+)</p>', html, re.IGNORECASE)
     for match in p_matches:
         text = match.strip()
@@ -1082,31 +1081,17 @@ def extract_text_from_html(html_bytes: bytes) -> str:
                 if text not in body_parts:
                     body_parts.append(text)
 
-    # Look for content after > that starts with capital letter (handles mangled tags)
-    # This catches patterns like: ifrppe>ABCDEFG... or similar compression artifacts
-    content_matches = re.findall(r'>([A-Z][^<]{3,}?)(?:<|/|$)', html)
-    for match in content_matches:
-        text = match.strip()
-        if text and len(text) >= 3 and text not in body_parts:
-            # Skip if it's mostly CSS/HTML
-            if not any(x in text.lower() for x in ['margin', 'display', 'font-', 'style', 'color:', 'width:', 'height:']):
-                body_parts.append(text)
-
-    # Look for numeric content (body like "2222 3333 4444...")
-    # More permissive pattern that captures content with artifacts
-    numeric_matches = re.findall(r'>(\d{2,}[^<]{5,}?)</p', html, re.IGNORECASE)
-    for match in numeric_matches:
-        text = match.strip()
-        if text and len(text) >= 5 and text not in body_parts:
-            body_parts.append(text)
-
-    # Also look for content in div with wrapper classes
-    div_matches = re.findall(r'<div[^>]*(?:wrapper|content|body)[^>]*>([^<]+)<', html, re.IGNORECASE)
-    for match in div_matches:
-        text = match.strip()
-        if text and len(text) >= 1 and text not in body_parts:
-            if not re.match(r'^[\s@#;:,.\-_{}()\[\]]+$', text):
-                body_parts.append(text)
+    # If no structured content found, try generic text extraction
+    if not body_parts:
+        # Look for any text content after >
+        content_matches = re.findall(r'>([^<]{3,})<', html)
+        for match in content_matches:
+            text = match.strip()
+            if text and len(text) >= 3:
+                # Skip CSS/HTML-like content
+                if not any(x in text.lower() for x in ['margin', 'display', 'font-', 'style', 'color:', 'width:', 'height:', '{', '}']):
+                    if text not in body_parts:
+                        body_parts.append(text)
 
     if body_parts:
         # Clean up compression artifacts in all extracted text
@@ -1195,8 +1180,12 @@ def extract_text_from_html(html_bytes: bytes) -> str:
             if part and len(part) > 1:
                 cleaned_parts.append(part)
 
+        # Join parts with newlines to preserve paragraph structure
         result = '\n'.join(cleaned_parts)
-        result = re.sub(r'\s+', ' ', result)
+        # Only collapse horizontal whitespace (spaces/tabs), preserve newlines
+        result = re.sub(r'[ \t]+', ' ', result)
+        # Clean up multiple consecutive newlines
+        result = re.sub(r'\n\s*\n', '\n\n', result)
         return result.strip()
 
     # Fallback: General text extraction between any tags
