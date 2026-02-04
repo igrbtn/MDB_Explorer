@@ -31,10 +31,17 @@ from email import encoders
 
 # Try to import LZXPRESS decompressor
 try:
-    from lzxpress import decompress_exchange_body, extract_text_from_html, extract_body_from_property_blob, get_body_preview
+    from lzxpress import decompress_exchange_body, extract_text_from_html, extract_body_from_property_blob, get_body_preview, get_html_content
     HAS_LZXPRESS = True
 except ImportError:
     HAS_LZXPRESS = False
+
+# Check if dissect.esedb is available for proper decompression
+try:
+    from dissect.esedb.compression import decompress as dissect_decompress
+    HAS_DISSECT = True
+except ImportError:
+    HAS_DISSECT = False
 
 # Try to import ESE Reader module
 try:
@@ -306,14 +313,19 @@ def extract_attachment_content_type(blob):
 
 def create_eml_content(email_data):
     """Create EML content from email data dict."""
+    # Get body content
+    body_text = email_data.get('body_text') or email_data.get('subject') or "(No content)"
+    body_html = email_data.get('body_html', '')
+
     # Create message
     if email_data.get('attachments'):
         msg = MIMEMultipart('mixed')
 
-        # Body part
+        # Body part (alternative with text and HTML)
         body_part = MIMEMultipart('alternative')
-        body_text = email_data.get('body_text') or email_data.get('subject') or "(No content)"
         body_part.attach(MIMEText(body_text, 'plain', 'utf-8'))
+        if body_html:
+            body_part.attach(MIMEText(body_html, 'html', 'utf-8'))
         msg.attach(body_part)
 
         # Attachments
@@ -330,8 +342,9 @@ def create_eml_content(email_data):
             msg.attach(attachment)
     else:
         msg = MIMEMultipart('alternative')
-        body_text = email_data.get('body_text') or email_data.get('subject') or "(No content)"
         msg.attach(MIMEText(body_text, 'plain', 'utf-8'))
+        if body_html:
+            msg.attach(MIMEText(body_html, 'html', 'utf-8'))
 
     # Headers
     sender = email_data.get('sender_email', 'unknown@unknown.com')
@@ -716,6 +729,12 @@ class MainWindow(QMainWindow):
         self.body_view.setReadOnly(True)
         self.body_view.setFont(QFont("Arial", 10))
         self.content_tabs.addTab(self.body_view, "Body (Text)")
+
+        # HTML Source tab (decompressed HTML)
+        self.html_source_view = QTextEdit()
+        self.html_source_view.setReadOnly(True)
+        self.html_source_view.setFont(QFont("Consolas", 9))
+        self.content_tabs.addTab(self.html_source_view, "HTML Source")
 
         # Raw Body tab with compressed/uncompressed toggle
         raw_body_widget = QWidget()
@@ -1433,6 +1452,7 @@ class MainWindow(QMainWindow):
 
         # === Body View ===
         body_text = ""
+        html_source = ""
         body_data_raw = None
         body_data_decompressed = None
 
@@ -1444,110 +1464,84 @@ class MainWindow(QMainWindow):
                     lv = record.get_value_data_as_long_value(native_body_idx)
                     if lv and hasattr(lv, 'get_data'):
                         body_data_raw = lv.get_data()
-                        if body_data_raw:
-                            # Try LZXPRESS decompression
+                        if body_data_raw and len(body_data_raw) > 7:
+                            header_type = body_data_raw[0]
+
+                            # Use LZXPRESS decompression (with dissect.esedb if available)
                             if HAS_LZXPRESS:
                                 try:
                                     body_data_decompressed = decompress_exchange_body(body_data_raw)
                                     if body_data_decompressed and len(body_data_decompressed) > 10:
+                                        # Extract text from HTML
                                         body_text = extract_text_from_html(body_data_decompressed)
+                                        # Store HTML source
+                                        html_source = body_data_decompressed.decode('utf-8', errors='replace')
                                 except Exception as e:
-                                    pass  # Fall through to manual extraction
+                                    pass
 
-                            # Fallback: Manual extraction if LZXPRESS not available or failed
-                            if not body_text:
-                                # Exchange NativeBody is compressed with header
-                                body_data = body_data_raw
-                                if body_data[:2] in [b'\x18\x79', b'\x18\x78', b'\x18\x9a']:
-                                    body_data = body_data[7:]
+                            # Fallback if decompression didn't work
+                            if not body_text and body_data_raw:
+                                # Try to extract printable text directly
+                                content = body_data_raw[7:] if header_type in [0x17, 0x18, 0x19] else body_data_raw
+                                printable = bytes(b for b in content if 32 <= b <= 126 or b in [9, 10, 13])
+                                if printable:
+                                    body_text = printable.decode('ascii', errors='ignore')
+                                    html_source = body_text
+            except Exception as e:
+                pass
 
-                                # Extract text content between <p> tags
-                                p_matches = re.findall(rb'>([^<]{1,500})</p', body_data, re.IGNORECASE)
-                                if p_matches:
-                                    text_parts = []
-                                    for match in p_matches:
-                                        filtered = bytes(c for c in match if 32 <= c <= 126)
-                                        if filtered and len(filtered) > 0:
-                                            text_parts.append(filtered.decode('ascii', errors='ignore'))
-                                    body_text = '\n'.join(text_parts)
-
-                                # If no <p> content, try general text extraction
-                                if not body_text:
-                                    text_parts = []
-                                    in_tag = False
-                                    current_text = bytearray()
-
-                                    for b in body_data:
-                                        if b == ord('<'):
-                                            if current_text:
-                                                filtered = bytes(c for c in current_text if 32 <= c <= 126)
-                                                if filtered and len(filtered) >= 2:
-                                                    text_parts.append(filtered.decode('ascii', errors='ignore'))
-                                                current_text = bytearray()
-                                            in_tag = True
-                                        elif b == ord('>'):
-                                            in_tag = False
-                                        elif not in_tag:
-                                            current_text.append(b)
-
-                                    if current_text:
-                                        filtered = bytes(c for c in current_text if 32 <= c <= 126)
-                                        if filtered:
-                                            text_parts.append(filtered.decode('ascii', errors='ignore'))
-
-                                    body_text = ' '.join(t.strip() for t in text_parts if len(t.strip()) >= 2)
+        # Try combined extraction with PropertyBlob if NativeBody failed
+        if not body_text and HAS_LZXPRESS:
+            try:
+                body_text = get_body_preview(body_data_raw, 2000, prop_blob)
             except:
                 pass
 
-        # Try OffPagePropertyBlob if NativeBody empty
-        if not body_text:
-            offpage_idx = col_map.get('OffPagePropertyBlob', -1)
-            if offpage_idx >= 0:
+        # Fall back to PropertyBlob strings
+        if not body_text and prop_blob:
+            if HAS_LZXPRESS:
                 try:
-                    if record.is_long_value(offpage_idx):
-                        lv = record.get_value_data_as_long_value(offpage_idx)
-                        if lv and hasattr(lv, 'get_data'):
-                            offpage_data = lv.get_data()
-                            if offpage_data and len(offpage_data) > 10:
-                                strings = re.findall(rb'[\x20-\x7e]{5,}', offpage_data)
-                                if strings:
-                                    body_text = ' '.join(s.decode('ascii', errors='ignore') for s in strings)
+                    body_text = extract_body_from_property_blob(prop_blob)
                 except:
                     pass
 
-        # Fall back to PropertyBlob strings
-        if not body_text and prop_blob:
-            strings = re.findall(rb'[\x20-\x7e]{10,}', prop_blob)
-            if strings:
-                body_text = "--- Extracted from PropertyBlob ---\n\n"
-                body_text += '\n'.join(s.decode('ascii', errors='ignore') for s in strings[:10])
+            if not body_text:
+                strings = re.findall(rb'[\x20-\x7e]{10,}', prop_blob)
+                if strings:
+                    body_text = "--- Extracted from PropertyBlob ---\n\n"
+                    body_text += '\n'.join(s.decode('ascii', errors='ignore') for s in strings[:10])
 
         # Set Body (Text) view
         if body_text:
             self.body_view.setPlainText(body_text)
         else:
-            lzx_status = "LZXPRESS decompressor loaded" if HAS_LZXPRESS else "LZXPRESS module not available"
-            note = f"""(Body content could not be fully extracted)
+            dissect_status = "dissect.esedb: Available" if HAS_DISSECT else "dissect.esedb: Not installed"
+            lzx_status = "lzxpress module: Loaded" if HAS_LZXPRESS else "lzxpress module: Not available"
+            note = f"""(No body content found)
 
-{lzx_status}
+Decompression Status:
+  {dissect_status}
+  {lzx_status}
 
-Exchange compresses HTML body content using LZXPRESS Plain LZ77 format.
-Some highly compressed content (like repeated patterns) may not fully
-decompress.
-
-Check the "Raw Body" tab to see compressed/decompressed data.
-
-To see the original body, export the message as EML and view in an
-email client, or check the original .eml file if available."""
+This message may not have body content, or uses an unsupported format.
+Check the "HTML Source" tab for raw decompressed HTML.
+Check the "Raw Body" tab to see compressed data."""
             self.body_view.setPlainText(note)
+
+        # Set HTML Source view
+        if html_source:
+            self.html_source_view.setPlainText(html_source)
+        else:
+            self.html_source_view.setPlainText("(No HTML content available)")
 
         # Store raw body data for toggle view
         self.current_raw_body_compressed = body_data_raw
         self.current_raw_body_decompressed = body_data_decompressed
         self._update_raw_body_view()
 
-        # Store for EML export
-        self.current_email_data['body_text'] = body_text
+        # Store for EML export - use actual body text if available
+        self.current_email_data['body_text'] = body_text if body_text else ""
+        self.current_email_data['body_html'] = html_source if html_source else ""
 
         # === Hex View ===
         if prop_blob:
@@ -1622,7 +1616,8 @@ email client, or check the original .eml file if available."""
             'date_sent': date_sent,
             'folder_name': folder_name,
             'has_attachments': has_attachments,
-            'body_text': subject,  # Use subject as body since body is often encrypted
+            'body_text': body_text if body_text else subject,  # Use extracted body, fallback to subject
+            'body_html': html_source,  # Include HTML source for EML export
             'attachments': eml_attachments
         }
 
@@ -1653,12 +1648,26 @@ email client, or check the original .eml file if available."""
             data = self.current_raw_body_compressed
             text = f"Raw NativeBody (Compressed) - {len(data)} bytes\n{'='*60}\n\n"
             text += "Header: " + ' '.join(f'{b:02x}' for b in data[:7]) + "\n"
-            if data[0] == 0x18:
-                text += "Type: 0x18 - LZXPRESS compressed HTML\n"
-            elif data[0] == 0x17:
-                text += "Type: 0x17 - Plain/encrypted content\n"
-            elif data[0] == 0x19:
-                text += "Type: 0x19 - LZXPRESS compressed variant\n"
+
+            header_type = data[0] if data else 0
+            type_descriptions = {
+                0x18: "0x18 - LZXPRESS compressed HTML",
+                0x19: "0x19 - LZXPRESS compressed variant",
+                0x17: "0x17 - Plain/encrypted content",
+                0x10: "0x10 - Plain text format",
+                0x12: "0x12 - Plain text variant",
+                0x14: "0x14 - Other format",
+                0x15: "0x15 - Other format",
+            }
+            type_desc = type_descriptions.get(header_type, f"0x{header_type:02x} - Unknown format")
+            text += f"Type: {type_desc}\n"
+
+            if len(data) > 2:
+                import struct
+                uncompressed_size = struct.unpack('<H', data[1:3])[0]
+                text += f"Expected uncompressed size: {uncompressed_size} bytes\n"
+
+            text += f"\nDecompression: {'dissect.esedb (proper LZXPRESS)' if HAS_DISSECT else 'fallback decoder'}\n"
             text += "\nHex dump:\n"
             text += self._hexdump(data)
             self.raw_body_view.setPlainText(text)
@@ -1666,6 +1675,7 @@ email client, or check the original .eml file if available."""
             # Show decompressed content
             data = self.current_raw_body_decompressed
             text = f"Raw NativeBody (Decompressed) - {len(data)} bytes\n{'='*60}\n\n"
+            text += f"Decompression method: {'dissect.esedb' if HAS_DISSECT else 'fallback'}\n\n"
             # Show as text if mostly printable
             printable_count = sum(1 for b in data if 32 <= b <= 126 or b in [9, 10, 13])
             if printable_count > len(data) * 0.7:
@@ -1748,7 +1758,7 @@ email client, or check the original .eml file if available."""
         # Check if message has attachments
         has_attach = get_bytes_value(record, col_map.get('HasAttachments', -1))
         if not has_attach or has_attach == b'\x00':
-            self.content_tabs.setTabText(5, "Attachments (0)")
+            self.content_tabs.setTabText(6, "Attachments (0)")
             return
 
         # Get SubobjectsBlob for attachment linking
@@ -1760,7 +1770,7 @@ email client, or check the original .eml file if available."""
         attach_table = self.tables.get(attach_table_name)
 
         if not attach_table:
-            self.content_tabs.setTabText(5, "Attachments (0)")
+            self.content_tabs.setTabText(6, "Attachments (0)")
             return
 
         attach_col_map = get_column_map(attach_table)
@@ -1920,7 +1930,7 @@ email client, or check the original .eml file if available."""
                 pass
 
         count = len(self.current_attachments)
-        self.content_tabs.setTabText(5, f"Attachments ({count})")
+        self.content_tabs.setTabText(6, f"Attachments ({count})")
 
         if count > 0:
             self.export_attach_btn.setEnabled(True)
