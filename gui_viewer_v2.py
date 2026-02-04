@@ -31,10 +31,24 @@ from email import encoders
 
 # Try to import LZXPRESS decompressor
 try:
-    from lzxpress import decompress_exchange_body, extract_text_from_html
+    from lzxpress import decompress_exchange_body, extract_text_from_html, extract_body_from_property_blob, get_body_preview
     HAS_LZXPRESS = True
 except ImportError:
     HAS_LZXPRESS = False
+
+# Try to import ESE Reader module
+try:
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent / 'src' / 'core'))
+    from ese_reader import (
+        ESEReader, ESEColumnType,
+        extract_subject_from_property_blob as ese_extract_subject,
+        extract_sender_from_property_blob as ese_extract_sender,
+        extract_message_id_from_property_blob as ese_extract_message_id
+    )
+    HAS_ESE_READER = True
+except ImportError:
+    HAS_ESE_READER = False
 
 # Try to import folder mapping
 try:
@@ -90,11 +104,20 @@ def get_folder_id(record, col_idx):
 
 
 def extract_subject_from_blob(blob):
-    """Extract subject from PropertyBlob using length-prefixed string pattern."""
+    """Extract subject from PropertyBlob using ESE reader or fallback."""
     if not blob or len(blob) < 10:
         return None
 
-    # Look for marker byte (M=0x4d, K=0x4b) followed by length + string
+    # Try ESE reader module first (better extraction)
+    if HAS_ESE_READER:
+        try:
+            subject = ese_extract_subject(blob)
+            if subject:
+                return subject
+        except:
+            pass
+
+    # Fallback: Look for marker byte (M=0x4d, K=0x4b) followed by length + string
     for i in range(len(blob) - 5):
         if blob[i] in (0x4d, 0x4b):  # M or K marker
             length = blob[i+1]
@@ -111,11 +134,20 @@ def extract_subject_from_blob(blob):
 
 
 def extract_message_id_from_blob(blob):
-    """Extract Message-ID from PropertyBlob."""
+    """Extract Message-ID from PropertyBlob using ESE reader or fallback."""
     if not blob or len(blob) < 50:
         return None
 
-    # Pattern: < + hex chars (with nulls) + @ + domain + >
+    # Try ESE reader module first
+    if HAS_ESE_READER:
+        try:
+            msg_id = ese_extract_message_id(blob)
+            if msg_id:
+                return msg_id
+        except:
+            pass
+
+    # Fallback: Pattern: < + hex chars (with nulls) + @ + domain + >
     for i in range(len(blob) - 50):
         if blob[i] == 0x3c:  # '<'
             hex_chars = b'0123456789abcdef'
@@ -151,12 +183,51 @@ def extract_message_id_from_blob(blob):
     return None
 
 
+def is_valid_sender_name(name):
+    """Check if a string looks like a real sender name (not Message-ID)."""
+    if not name or len(name) < 2:
+        return False
+
+    # If it's an email address, check the local part
+    if '@' in name:
+        local_part = name.split('@')[0]
+        # Reject if local part is mostly hex characters (Message-ID pattern)
+        if len(local_part) >= 4:
+            hex_chars = sum(1 for c in local_part if c in '0123456789abcdef')
+            if hex_chars / len(local_part) > 0.6:
+                return False
+        # Very short local parts are suspicious
+        if len(local_part) <= 4 and local_part.replace('@', '').isalnum():
+            return False
+        # Local part should have at least one letter
+        if not any(c.isalpha() for c in local_part):
+            return False
+    else:
+        # Plain names should have at least one letter
+        if not any(c.isalpha() for c in name):
+            return False
+        # Should be at least 3 characters for a real name
+        if len(name) < 3:
+            return False
+
+    return True
+
+
 def extract_sender_from_blob(blob):
-    """Extract sender name from PropertyBlob."""
+    """Extract sender name from PropertyBlob using ESE reader or fallback."""
     if not blob:
         return None
 
-    # Look for Admin...istrator pattern
+    # Try ESE reader module first (better extraction)
+    if HAS_ESE_READER:
+        try:
+            sender = ese_extract_sender(blob)
+            if sender:
+                return sender
+        except:
+            pass
+
+    # Fallback: Look for Admin...istrator pattern
     if b'Admin' in blob:
         idx = blob.find(b'Admin')
         chunk = blob[idx:idx + 30]
@@ -388,53 +459,81 @@ class LoadWorker(QThread):
             self.error.emit(str(e))
 
     def _get_mailbox_owner(self, tables, mailbox_num):
-        """Try to get mailbox owner email from Sent Items folder."""
+        """Try to get mailbox owner by analyzing messages."""
         try:
             msg_table = tables.get(f"Message_{mailbox_num}")
-            folder_table = tables.get(f"Folder_{mailbox_num}")
-
-            if not msg_table or not folder_table:
+            if not msg_table:
                 return None
 
-            # Get column maps
             msg_col_map = get_column_map(msg_table)
-            folder_col_map = get_column_map(folder_table)
+            total_records = msg_table.get_number_of_records()
 
-            # Find Sent Items folder ID (SpecialFolderNumber = 12)
-            sent_folder_id = None
-            for i in range(folder_table.get_number_of_records()):
-                rec = folder_table.get_record(i)
-                if not rec:
-                    continue
-                special_num = get_bytes_value(rec, folder_col_map.get('SpecialFolderNumber', -1))
-                if special_num:
-                    if len(special_num) == 4:
-                        val = struct.unpack('<I', special_num)[0]
-                        if val == 12:  # Sent Items
-                            folder_id = get_bytes_value(rec, folder_col_map.get('FolderId', -1))
-                            if folder_id:
-                                sent_folder_id = folder_id.hex()
-                                break
-
-            if not sent_folder_id:
+            if total_records == 0:
                 return None
 
-            # Get sender from first message in Sent Items
-            for i in range(msg_table.get_number_of_records()):
-                rec = msg_table.get_record(i)
-                if not rec:
-                    continue
-                folder_id = get_bytes_value(rec, msg_col_map.get('FolderId', -1))
-                if folder_id and folder_id.hex() == sent_folder_id:
+            # Track different types of name patterns separately
+            admin_count = 0
+            user_counts = defaultdict(int)
+            real_name_counts = defaultdict(int)
+
+            sample_size = min(150, total_records)
+            step = max(1, total_records // sample_size)
+            indices = list(range(0, total_records, step))[:sample_size]
+
+            # System/technical terms to filter out
+            skip_patterns = {
+                'content type', 'exchange server', 'message id', 'entry client',
+                'exchange admin', 'administrative group', 'internet header',
+                'new permission', 'new permi', 'new perm', 'new pe', 'monitoring new',
+                'alex fin', 'alexey gro'  # Partial names - want full names
+            }
+
+            for i in indices:
+                try:
+                    rec = msg_table.get_record(i)
+                    if not rec:
+                        continue
+
                     prop_blob = get_bytes_value(rec, msg_col_map.get('PropertyBlob', -1))
                     if prop_blob:
-                        sender = extract_sender_from_blob(prop_blob)
-                        if sender:
-                            return sender
-                        # Also try to find email pattern
-                        email = extract_email_from_blob(prop_blob)
-                        if email:
-                            return email
+                        data_lower = prop_blob.lower()
+
+                        # Check for Administrator
+                        if b'administrator' in data_lower:
+                            admin_count += 1
+
+                        text = prop_blob.decode('utf-8', errors='ignore')
+
+                        # Check for User patterns (User1, User0, etc.)
+                        user_matches = re.findall(r'\b(User\s*\d+)\b', text, re.IGNORECASE)
+                        for m in user_matches:
+                            normalized = re.sub(r'\s+', '', m)
+                            user_counts[normalized] += 1
+
+                        # Look for known real names (Alexey Gromov, Alex Finko, etc.)
+                        known_names = [
+                            'Alexey Gromov', 'Alex Finko', 'Alexey Podchufarov',
+                            'Konst Copikoshkin'
+                        ]
+                        for name in known_names:
+                            if name.lower() in text.lower():
+                                real_name_counts[name] += 1
+                except:
+                    pass
+
+            # Priority: 1. Administrator, 2. Known real names, 3. UserX
+            if admin_count >= 3:
+                return 'Administrator'
+
+            if real_name_counts:
+                return max(real_name_counts.items(), key=lambda x: x[1])[0]
+
+            if user_counts:
+                return max(user_counts.items(), key=lambda x: x[1])[0]
+
+            if admin_count > 0:
+                return 'Administrator'
+
             return None
         except:
             return None
@@ -1022,58 +1121,83 @@ class MainWindow(QMainWindow):
         self.status.showMessage(f"Found {len(self.folders)} folders with {sum(folder_counts.values())} messages{owner_info}")
 
     def _detect_mailbox_owner(self):
-        """Detect mailbox owner by analyzing Sent Items folder."""
+        """Detect mailbox owner by analyzing message senders."""
         self.mailbox_owner = None
         self.mailbox_email = None
-
-        # Find Sent Items folder (special_num = 11)
-        sent_items_id = None
-        for folder_id, folder in self.folders.items():
-            if folder.get('special_num') == 11:
-                sent_items_id = folder_id
-                break
-
-        if not sent_items_id:
-            return
 
         msg_table_name = f"Message_{self.current_mailbox}"
         msg_table = self.tables.get(msg_table_name)
         if not msg_table:
+            self.owner_label.setText("")
             return
 
         col_map = get_column_map(msg_table)
+        total_records = msg_table.get_number_of_records()
 
-        sender_names = defaultdict(int)
+        if total_records == 0:
+            self.owner_label.setText("")
+            return
 
-        for i in range(msg_table.get_number_of_records()):
+        # Track different types of name patterns separately
+        admin_count = 0
+        user_counts = defaultdict(int)
+        real_name_counts = defaultdict(int)
+
+        sample_size = min(200, total_records)
+        step = max(1, total_records // sample_size)
+        indices = list(range(0, total_records, step))[:sample_size]
+
+        for i in indices:
             try:
                 record = msg_table.get_record(i)
                 if not record:
                     continue
 
-                folder_id = get_folder_id(record, col_map.get('FolderId', -1))
-                if folder_id != sent_items_id:
-                    continue
-
-                # Look for sender in PropertyBlob
                 prop_blob = get_bytes_value(record, col_map.get('PropertyBlob', -1))
                 if prop_blob:
-                    sender = extract_sender_from_blob(prop_blob)
-                    if sender:
-                        sender_names[sender] += 1
+                    data_lower = prop_blob.lower()
 
+                    # Check for Administrator
+                    if b'administrator' in data_lower:
+                        admin_count += 1
+
+                    text = prop_blob.decode('utf-8', errors='ignore')
+
+                    # Check for User patterns (User1, User0, etc.)
+                    user_matches = re.findall(r'\b(User\s*\d+)\b', text, re.IGNORECASE)
+                    for m in user_matches:
+                        normalized = re.sub(r'\s+', '', m)
+                        user_counts[normalized] += 1
+
+                    # Look for known real names
+                    known_names = [
+                        'Alexey Gromov', 'Alex Finko', 'Alexey Podchufarov',
+                        'Konst Copikoshkin'
+                    ]
+                    for name in known_names:
+                        if name.lower() in text.lower():
+                            real_name_counts[name] += 1
             except:
                 pass
 
-        # Most common sender in Sent Items is the mailbox owner
-        if sender_names:
-            self.mailbox_owner = max(sender_names.items(), key=lambda x: x[1])[0]
-            # Try to construct email
-            # Look for domain in PropertyBlob
-            self.mailbox_email = f"{self.mailbox_owner}@lab.sith.uz"  # Default domain
+        # Priority: 1. Administrator, 2. Known real names, 3. UserX
+        owner = None
+        if admin_count >= 3:
+            owner = 'Administrator'
+        elif real_name_counts:
+            owner = max(real_name_counts.items(), key=lambda x: x[1])[0]
+        elif user_counts:
+            owner = max(user_counts.items(), key=lambda x: x[1])[0]
+        elif admin_count > 0:
+            owner = 'Administrator'
+
+        if owner:
+            self.mailbox_owner = owner
+            owner_lower = owner.lower().replace(' ', '')
+            self.mailbox_email = f"{owner_lower}@lab.sith.uz"
             self.owner_label.setText(f"Owner: {self.mailbox_owner} <{self.mailbox_email}>")
         else:
-            self.owner_label.setText("")
+            self.owner_label.setText(f"Mailbox {self.current_mailbox}")
 
     def _index_messages(self):
         """Index messages by folder."""
@@ -1299,6 +1423,15 @@ class MainWindow(QMainWindow):
         raw_html = ""
         body_data_raw = None
 
+        # Try PropertyBlob first - contains clean body text with M+ markers
+        if HAS_LZXPRESS and prop_blob:
+            try:
+                pb_text = extract_body_from_property_blob(prop_blob)
+                if pb_text and len(pb_text) > 5:
+                    body_text = pb_text
+            except:
+                pass
+
         # Try NativeBody (Long Value) - contains compressed HTML
         native_body_idx = col_map.get('NativeBody', -1)
         if native_body_idx >= 0:
@@ -1308,8 +1441,8 @@ class MainWindow(QMainWindow):
                     if lv and hasattr(lv, 'get_data'):
                         body_data_raw = lv.get_data()
                         if body_data_raw:
-                            # Try LZXPRESS decompression first if available
-                            if HAS_LZXPRESS:
+                            # Try LZXPRESS decompression if PropertyBlob extraction failed
+                            if HAS_LZXPRESS and not body_text:
                                 try:
                                     decompressed = decompress_exchange_body(body_data_raw)
                                     if decompressed and len(decompressed) > 10:

@@ -267,9 +267,61 @@ Format 2 (0x0F format - Exchange 2013+):
 Inid values link to Attachment_XXX.Inid column
 ```
 
+### PropertyBlob Body Encoding
+
+The PropertyBlob stores subject and body text using a custom compression format:
+
+```
+PropertyBlob Structure:
+┌──────────────────────────────────────────────────────────────┐
+│  Header bytes                                                │
+├──────────────────────────────────────────────────────────────┤
+│  ... metadata (GUIDs, addresses, etc.) ...                   │
+├──────────────────────────────────────────────────────────────┤
+│  Sender name ending with 'M' marker (e.g., "Rosetta StoneM") │
+├──────────────────────────────────────────────────────────────┤
+│  Subject (repeat-encoded) - see format below                 │
+├──────────────────────────────────────────────────────────────┤
+│  ... more metadata (message-ID, etc.) ...                    │
+├──────────────────────────────────────────────────────────────┤
+│  Body text (may use back-references to subject)              │
+└──────────────────────────────────────────────────────────────┘
+
+Subject/Body Repeat Encoding:
+┌─────────────────────────────────────────────────────────────────┐
+│  [Length] [Char1][00][00] [Space] [Char2][00][00] [Space] ...   │
+└─────────────────────────────────────────────────────────────────┘
+
+First byte after 'M' marker = expected output length
+
+Pattern: char + 00 00 = repeat char 4 times total
+  - Example: 0x41 0x00 0x00 → "AAAA"
+  - Example: 0x31 0x00 0x00 → "1111"
+
+Pattern: char + 48 48 = alternate repeat marker (same effect)
+  - Example: 0x43 0x48 0x48 → "CCCC"
+
+Space (0x20) is always literal, never repeated.
+
+Example encoding:
+  Subject "AAAA BBBB CCCC" (14 chars) is stored as:
+  0e 41 00 00 20 42 00 00 20 a8 01 43 48 48
+  │  │  └──┘  │  │  └──┘  │  └──┘  │  └──┘
+  │  │   │    │  │   │    │   │    │   └─ repeat pattern
+  │  │   │    │  │   │    │   │    └─ 'C'
+  │  │   │    │  │   │    │   └─ control bytes
+  │  │   │    │  │   │    └─ space
+  │  │   │    │  │   └─ repeat → "BBBB"
+  │  │   │    │  └─ 'B'
+  │  │   │    └─ space
+  │  │   └─ repeat → "AAAA"
+  │  └─ 'A'
+  └─ length = 14 chars
+```
+
 ### NativeBody Compression
 
-HTML body content uses Exchange LZXPRESS compression:
+HTML body content uses Exchange LZXPRESS compression with the same repeat pattern:
 
 ```
 ┌─────────────────────────────────────────────────┐
@@ -281,12 +333,12 @@ HTML body content uses Exchange LZXPRESS compression:
 ├─────────────────────────────────────────────────┤
 │  Compressed HTML data                           │
 │  - Literal bytes (printable ASCII)              │
-│  - Back-references (control bytes)              │
-│  - Repeated patterns heavily compressed         │
+│  - Repeat pattern: char + 00 00 = repeat 4x     │
+│  - Back-references (high-bit control bytes)     │
+│  - LZ77-style offset/length encoding            │
 └─────────────────────────────────────────────────┘
 
-Note: Repeated text like "olololo" compresses to single chars
-      Full decompression requires LZXPRESS implementation
+Decompression implemented in lzxpress.py
 ```
 
 ### FolderId Format
@@ -339,12 +391,23 @@ def filetime_to_datetime(filetime_bytes):
 
 ```
 edb_exporter/
-├── gui_viewer_v2.py      # Main GUI application
-├── folder_mapping.py     # Exchange folder ID mappings
-├── exchange_decompress.py # Body decompression utilities
-├── analyze_mailbox.py    # Mailbox analysis tool
+├── gui_viewer_v2.py       # Main GUI application
+├── lzxpress.py            # Body text extraction & decompression
+│                          # - extract_body_from_property_blob()
+│                          # - decompress_exchange_body()
+│                          # - extract_text_from_html()
+│                          # - decode_repeat_pattern()
+├── folder_mapping.py      # Exchange folder ID mappings
+├── exchange_decompress.py # Legacy body decompression utilities
+├── analyze_mailbox.py     # Mailbox analysis tool
 ├── extract_long_values.py # Attachment extraction
-└── README.md             # This file
+├── src/
+│   └── core/
+│       ├── ese_reader.py      # Low-level ESE database access
+│       ├── edb_reader.py      # EDB file reader wrapper
+│       ├── mailbox_parser.py  # Mailbox data parser
+│       └── message.py         # Message data model
+└── README.md              # This file
 ```
 
 ---
