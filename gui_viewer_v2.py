@@ -1300,6 +1300,10 @@ class MainWindow(QMainWindow):
         self.export_folder_btn.setEnabled(True)
         message_indices = self.messages_by_folder.get(folder_id, [])
 
+        # Check if this is Sent Items folder (special_num = 12)
+        folder_info = self.folders.get(folder_id, {})
+        is_sent_items = folder_info.get('special_num') == 12 or folder_info.get('display_name', '').lower() == 'sent items'
+
         if not message_indices:
             self.status.showMessage(f"No messages in this folder")
             return
@@ -1355,8 +1359,14 @@ class MainWindow(QMainWindow):
             # Get DisplayTo for recipient
             display_to = get_string_value(record, col_map.get('DisplayTo', -1))
 
-            item.setText(2, sender)  # From
-            item.setText(3, display_to or sender)  # To (fallback to sender if empty)
+            # In Sent Items: show To address in From column (who you sent to)
+            # In other folders: show From address (who sent to you)
+            if is_sent_items:
+                item.setText(2, display_to or "")  # Show recipient in From column
+                item.setText(3, sender or "")  # Show sender (yourself) in To column
+            else:
+                item.setText(2, sender)  # From
+                item.setText(3, display_to or sender)  # To
             item.setText(4, subject)  # Subject
 
             # Get IsRead
