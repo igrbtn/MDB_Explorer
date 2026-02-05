@@ -85,6 +85,11 @@ pip install PyQt6 libesedb-python dissect.esedb python-dateutil chardet
 python gui_viewer_v2.py [path_to_edb_file]
 ```
 
+**Windows (if multiple Python versions installed):**
+```cmd
+py -3.12 gui_viewer_v2.py [path_to_edb_file]
+```
+
 Or launch without arguments and use the Browse button to select an EDB file.
 
 ### Command Line Mode
@@ -92,6 +97,8 @@ Or launch without arguments and use the Browse button to select an EDB file.
 ```bash
 python cli.py <edb_file> <command> [options]
 ```
+
+**Windows:** `py -3.12 cli.py <edb_file> <command> [options]`
 
 **Commands:**
 
