@@ -38,20 +38,18 @@ A Python GUI application for viewing and exporting emails from Microsoft Exchang
 
 ### Windows
 
-1. Install **Visual C++ Build Tools** (required for libesedb-python):
-   - Download from [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
-   - Run installer and select **"Desktop development with C++"**
-   - Restart your computer after installation
-
-2. Install Python 3.10+ from [python.org](https://www.python.org/downloads/)
+1. Install Python 3.10, 3.11, or 3.12 from [python.org](https://www.python.org/downloads/)
    - **Important:** Check "Add Python to PATH" during installation
+   - Pre-built wheels are available for these Python versions
 
-3. Clone and run install script:
+2. Clone and run install script:
 ```cmd
 git clone https://github.com/igrbtn/MDB_Explorer.git
 cd MDB_Explorer
 install_windows.bat
 ```
+
+> **Note:** If installation fails, you may need [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (select "Desktop development with C++").
 
 ### macOS
 

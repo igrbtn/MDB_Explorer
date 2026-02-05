@@ -43,35 +43,35 @@ pip install PyQt6>=6.4.0
 
 echo [2/5] Installing libesedb-python...
 echo.
-echo NOTE: libesedb-python requires Microsoft Visual C++ Build Tools to compile.
-echo.
-pip install libesedb-python
+echo Trying to install pre-built wheel...
+pip install --only-binary :all: libesedb-python
 if errorlevel 1 (
     echo.
-    echo ==========================================
-    echo  libesedb-python installation FAILED
-    echo ==========================================
-    echo.
-    echo This package is REQUIRED and needs Visual C++ Build Tools.
-    echo.
-    echo Please follow these steps:
-    echo.
-    echo 1. Download Visual C++ Build Tools from:
-    echo    https://visualstudio.microsoft.com/visual-cpp-build-tools/
-    echo.
-    echo 2. Run the installer
-    echo.
-    echo 3. Select "Desktop development with C++" workload
-    echo.
-    echo 4. Click Install and wait for completion
-    echo.
-    echo 5. RESTART your computer
-    echo.
-    echo 6. Run this script again
-    echo.
-    echo ==========================================
-    pause
-    exit /b 1
+    echo Pre-built wheel not found for your Python version.
+    echo Trying to build from source...
+    pip install libesedb-python
+    if errorlevel 1 (
+        echo.
+        echo ==========================================
+        echo  libesedb-python installation FAILED
+        echo ==========================================
+        echo.
+        echo Pre-built wheels are available for Python 3.8-3.12.
+        echo Your Python version may not be supported.
+        echo.
+        echo Options:
+        echo.
+        echo 1. Install Python 3.10, 3.11, or 3.12 from python.org
+        echo    (Pre-built wheels are available for these versions)
+        echo.
+        echo 2. Install Visual C++ Build Tools to compile from source:
+        echo    https://visualstudio.microsoft.com/visual-cpp-build-tools/
+        echo    Select "Desktop development with C++" and restart PC
+        echo.
+        echo ==========================================
+        pause
+        exit /b 1
+    )
 )
 
 echo [3/5] Installing dissect.esedb...
