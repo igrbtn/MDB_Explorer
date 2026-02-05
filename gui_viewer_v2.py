@@ -24,12 +24,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QDate
 from PyQt6.QtGui import QFont, QAction, QTextOption, QColor, QPalette
 
-# Try to import WebEngine for proper HTML rendering
-try:
-    from PyQt6.QtWebEngineWidgets import QWebEngineView
-    HAS_WEBENGINE = True
-except ImportError:
-    HAS_WEBENGINE = False
+# Using QTextBrowser for lightweight HTML rendering (no WebEngine dependency)
 
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -918,21 +913,14 @@ class MainWindow(QMainWindow):
         self.body_view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.content_tabs.addTab(self.body_view, "Body (Text)")
 
-        # Body HTML tab - renders HTML like a browser with full CSS/images support
-        if HAS_WEBENGINE:
-            self.html_browser_view = QWebEngineView()
-            # Set white background
-            self.html_browser_view.page().setBackgroundColor(QColor(255, 255, 255))
-        else:
-            # Fallback to QTextBrowser if WebEngine not available
-            self.html_browser_view = QTextBrowser()
-            self.html_browser_view.setReadOnly(True)
-            self.html_browser_view.setOpenExternalLinks(True)
-            self.html_browser_view.setFont(QFont("Arial", 11))
-            # Set white background for fallback
-            palette = self.html_browser_view.palette()
-            palette.setColor(QPalette.ColorRole.Base, QColor(255, 255, 255))
-            self.html_browser_view.setPalette(palette)
+        # Body HTML tab - lightweight QTextBrowser for HTML rendering
+        self.html_browser_view = QTextBrowser()
+        self.html_browser_view.setReadOnly(True)
+        self.html_browser_view.setOpenExternalLinks(True)
+        self.html_browser_view.setFont(QFont("Arial", 11))
+        palette = self.html_browser_view.palette()
+        palette.setColor(QPalette.ColorRole.Base, QColor(255, 255, 255))
+        self.html_browser_view.setPalette(palette)
         self.content_tabs.addTab(self.html_browser_view, "Body (HTML)")
 
         # HTML Source tab - shows raw HTML code
