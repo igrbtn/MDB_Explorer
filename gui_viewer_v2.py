@@ -1017,7 +1017,7 @@ class MainWindow(QMainWindow):
         right_layout.addLayout(content_export_layout)
 
         main_splitter.addWidget(right_panel)
-        main_splitter.setSizes([250, 400, 600])
+        main_splitter.setSizes([400, 400, 450])  # Equal height/width for all panels
 
         layout.addWidget(main_splitter)
 
