@@ -821,15 +821,30 @@ class EmailExtractor:
         return attachments
 
     def _parse_subobjects(self, blob: bytes) -> List[int]:
-        """Parse SubobjectsBlob to get attachment Inid values."""
+        """Parse SubobjectsBlob to get attachment Inid values.
+
+        SubobjectsBlob may be compressed (starts with certain markers like 0x0f).
+        After decompression, attachments are marked with 0x21 followed by Inid byte.
+        """
         if not blob:
             return []
 
+        # Try to decompress the blob first (some SubobjectsBlobs are compressed)
+        data = blob
+        try:
+            from dissect.esedb.compression import decompress as dissect_decompress
+            decompressed = dissect_decompress(blob)
+            if decompressed:
+                data = decompressed
+        except:
+            pass  # Use raw blob if decompression fails
+
+        # Parse using 0x21 pattern: 0x21 followed by Inid byte
         inids = []
         i = 0
-        while i < len(blob) - 1:
-            if blob[i] == 0x21:
-                inids.append(blob[i + 1])
+        while i < len(data) - 1:
+            if data[i] == 0x21:
+                inids.append(data[i + 1])
                 i += 2
             else:
                 i += 1

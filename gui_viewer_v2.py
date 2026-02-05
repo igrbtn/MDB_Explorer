@@ -18,9 +18,10 @@ from PyQt6.QtWidgets import (
     QSplitter, QTextEdit, QComboBox, QGroupBox, QLineEdit,
     QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
     QStatusBar, QMessageBox, QProgressBar, QMenu, QListWidget,
-    QListWidgetItem, QCheckBox, QTextBrowser
+    QListWidgetItem, QCheckBox, QTextBrowser, QDialog, QFormLayout,
+    QDateEdit, QDialogButtonBox
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QDate
 from PyQt6.QtGui import QFont, QAction, QTextOption, QColor, QPalette
 
 # Try to import WebEngine for proper HTML rendering
@@ -886,6 +887,18 @@ class MainWindow(QMainWindow):
         self.export_calendar_btn.setToolTip("Export calendar items from this folder to .ics file")
         export_layout.addWidget(self.export_calendar_btn)
 
+        self.export_mailbox_btn = QPushButton("Export Mailbox...")
+        self.export_mailbox_btn.clicked.connect(self._on_export_mailbox)
+        self.export_mailbox_btn.setEnabled(False)
+        self.export_mailbox_btn.setToolTip("Export entire mailbox with filters (date, from, to, subject)")
+        export_layout.addWidget(self.export_mailbox_btn)
+
+        # About button
+        self.about_btn = QPushButton("About")
+        self.about_btn.clicked.connect(self._on_about)
+        self.about_btn.setToolTip("About this application")
+        export_layout.addWidget(self.about_btn)
+
         middle_layout.addLayout(export_layout)
 
         main_splitter.addWidget(middle_panel)
@@ -1088,6 +1101,7 @@ class MainWindow(QMainWindow):
         try:
             self._load_folders()
             self._index_messages()
+            self.export_mailbox_btn.setEnabled(True)
         except Exception as e:
             self.status.showMessage(f"Error loading mailbox: {e}")
             QMessageBox.warning(self, "Error", f"Failed to load mailbox:\n{e}")
@@ -2592,6 +2606,237 @@ a {{ color: #0066cc; }}
         else:
             QMessageBox.warning(self, "Export Error", "Failed to export calendar items")
 
+    def _get_folder_path(self, folder_id: str) -> str:
+        """Build full folder hierarchy path by traversing parent_id chain.
+
+        Args:
+            folder_id: The folder ID to get path for
+
+        Returns:
+            Full path like "Inbox/Subfolder1/Subfolder2"
+        """
+        path_parts = []
+        visited = set()  # Prevent infinite loops
+
+        current_id = folder_id
+        while current_id and current_id not in visited:
+            visited.add(current_id)
+
+            folder = self.folders.get(current_id)
+            if not folder:
+                break
+
+            folder_name = folder.get('display_name', 'Unknown')
+            path_parts.insert(0, folder_name)
+
+            # Move to parent
+            current_id = folder.get('parent_id')
+
+        if not path_parts:
+            return "Unknown"
+
+        return "/".join(path_parts)
+
+    def _on_export_mailbox(self):
+        """Export entire mailbox with filters to folder structure with EML files."""
+        if not self.current_mailbox:
+            QMessageBox.warning(self, "Export", "No mailbox selected")
+            return
+
+        # Create filter dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Export Mailbox")
+        dialog.setMinimumWidth(400)
+        layout = QVBoxLayout(dialog)
+
+        # Filter section
+        filter_group = QGroupBox("Filters (leave empty to export all)")
+        filter_layout = QFormLayout(filter_group)
+
+        # Date range
+        date_from = QDateEdit()
+        date_from.setCalendarPopup(True)
+        date_from.setDate(QDate(2020, 1, 1))
+        date_from.setDisplayFormat("yyyy-MM-dd")
+        filter_layout.addRow("Date From:", date_from)
+
+        date_to = QDateEdit()
+        date_to.setCalendarPopup(True)
+        date_to.setDate(QDate.currentDate())
+        date_to.setDisplayFormat("yyyy-MM-dd")
+        filter_layout.addRow("Date To:", date_to)
+
+        # From filter
+        from_filter = QLineEdit()
+        from_filter.setPlaceholderText("Filter by sender (contains)")
+        filter_layout.addRow("From:", from_filter)
+
+        # To filter
+        to_filter = QLineEdit()
+        to_filter.setPlaceholderText("Filter by recipient (contains)")
+        filter_layout.addRow("To:", to_filter)
+
+        # Subject filter
+        subject_filter = QLineEdit()
+        subject_filter.setPlaceholderText("Filter by subject (contains)")
+        filter_layout.addRow("Subject:", subject_filter)
+
+        # Include hidden
+        include_hidden = QCheckBox("Include hidden/system items")
+        filter_layout.addRow("", include_hidden)
+
+        layout.addWidget(filter_group)
+
+        # Folder selection
+        folder_group = QGroupBox("Folders to Export")
+        folder_layout = QVBoxLayout(folder_group)
+
+        export_all_folders = QCheckBox("Export all folders")
+        export_all_folders.setChecked(True)
+        folder_layout.addWidget(export_all_folders)
+
+        layout.addWidget(folder_group)
+
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        # Get filter values
+        filter_date_from = date_from.date().toPyDate()
+        filter_date_to = date_to.date().toPyDate()
+        filter_from_text = from_filter.text().strip().lower()
+        filter_to_text = to_filter.text().strip().lower()
+        filter_subject_text = subject_filter.text().strip().lower()
+        filter_include_hidden = include_hidden.isChecked()
+
+        # Select output directory
+        output_dir = QFileDialog.getExistingDirectory(self, "Select Export Directory")
+        if not output_dir:
+            return
+
+        # Create mailbox folder
+        mailbox_name = self.mailbox_owner or f"Mailbox_{self.current_mailbox}"
+        mailbox_dir = Path(output_dir) / mailbox_name.replace(' ', '_')
+        mailbox_dir.mkdir(exist_ok=True)
+
+        msg_table_name = f"Message_{self.current_mailbox}"
+        msg_table = self.tables.get(msg_table_name)
+        if not msg_table:
+            QMessageBox.warning(self, "Export", "Message table not found")
+            return
+
+        col_map = get_column_map(msg_table)
+
+        # Get all message indices with folder hierarchy paths
+        all_indices = []
+        for folder_id, indices in self.messages_by_folder.items():
+            folder_path_str = self._get_folder_path(folder_id)  # Full hierarchy path
+            for idx in indices:
+                all_indices.append((idx, folder_id, folder_path_str))
+
+        self.progress.setVisible(True)
+        self.progress.setRange(0, len(all_indices))
+
+        exported = 0
+        skipped = 0
+
+        for i, (rec_idx, folder_id, folder_path_str) in enumerate(all_indices):
+            self.progress.setValue(i + 1)
+            if i % 50 == 0:
+                QApplication.processEvents()
+
+            try:
+                record = msg_table.get_record(rec_idx)
+                if not record:
+                    continue
+
+                # Check hidden filter
+                is_hidden = get_bytes_value(record, col_map.get('IsHidden', -1))
+                is_hidden_val = bool(is_hidden and is_hidden != b'\x00')
+                if is_hidden_val and not filter_include_hidden:
+                    skipped += 1
+                    continue
+
+                # Get date
+                date_received = get_filetime_value(record, col_map.get('DateReceived', -1))
+                if date_received:
+                    msg_date = date_received.date()
+                    if msg_date < filter_date_from or msg_date > filter_date_to:
+                        skipped += 1
+                        continue
+
+                # Extract message data (with attachments)
+                email_msg = None
+                if HAS_EMAIL_MODULE and self.email_extractor:
+                    email_msg = self.email_extractor.extract_message(
+                        record, col_map, rec_idx,
+                        folder_name=folder_path_str,  # Full hierarchy path
+                        tables=self.tables,
+                        mailbox_num=self.current_mailbox
+                    )
+
+                if not email_msg:
+                    skipped += 1
+                    continue
+
+                # Apply text filters
+                from_header = email_msg.get_from_header().lower()
+                to_header = email_msg.get_to_header().lower()
+                subject = (email_msg.subject or "").lower()
+
+                if filter_from_text and filter_from_text not in from_header:
+                    skipped += 1
+                    continue
+
+                if filter_to_text and filter_to_text not in to_header:
+                    skipped += 1
+                    continue
+
+                if filter_subject_text and filter_subject_text not in subject:
+                    skipped += 1
+                    continue
+
+                # Create folder hierarchy directories (folder/subfolder/subfolder)
+                # Sanitize each path component
+                path_parts = folder_path_str.split('/')
+                safe_parts = [re.sub(r'[<>:"/\\|?*]', '_', part or 'Unknown') for part in path_parts]
+                folder_path = mailbox_dir
+                for part in safe_parts:
+                    folder_path = folder_path / part
+                folder_path.mkdir(parents=True, exist_ok=True)
+
+                # Generate filename
+                date_str = date_received.strftime("%Y%m%d_%H%M%S") if date_received else "nodate"
+                subject_safe = re.sub(r'[<>:"/\\|?*]', '_', email_msg.subject or 'no_subject')[:40]
+                filename = f"{date_str}_{rec_idx}_{subject_safe}.eml"
+
+                # Export to EML
+                eml_content = email_msg.to_eml()
+                out_path = folder_path / filename
+                with open(out_path, 'wb') as f:
+                    f.write(eml_content)
+
+                exported += 1
+
+            except Exception as e:
+                self.status.showMessage(f"Error exporting record {rec_idx}: {e}")
+
+        self.progress.setVisible(False)
+
+        # Summary
+        summary = f"Export complete!\n\n"
+        summary += f"Exported: {exported} emails\n"
+        summary += f"Skipped: {skipped} emails (filtered out)\n"
+        summary += f"Location: {mailbox_dir}"
+
+        self.status.showMessage(f"Exported {exported} emails to {mailbox_dir}")
+        QMessageBox.information(self, "Export Mailbox", summary)
+
     def _on_save_attachment(self):
         """Save selected attachment."""
         items = self.attach_list.selectedItems()
@@ -2658,6 +2903,49 @@ a {{ color: #0066cc; }}
                 self.status.showMessage(f"Saved {filename} to {path}")
             except Exception as e:
                 QMessageBox.critical(self, "Save Error", f"Failed to save attachment:\n{e}")
+
+    def _on_about(self):
+        """Show About dialog with developer information."""
+        about_text = """
+<h2>Exchange EDB Exporter</h2>
+<p><b>Version:</b> 1.0</p>
+<p>A tool for viewing and exporting email data from Microsoft Exchange EDB database files.</p>
+
+<h3>Features:</h3>
+<ul>
+<li>Browse mailboxes, folders, and messages</li>
+<li>View email content (text, HTML, headers)</li>
+<li>Export to EML format with attachments</li>
+<li>Export calendar items to ICS format</li>
+<li>Batch export with filters</li>
+</ul>
+
+<h3>Developer:</h3>
+<p><b>Igor Batin</b></p>
+<p>
+<a href="https://github.com/igrbtn">GitHub: github.com/igrbtn</a><br>
+<a href="mailto:igr.btn@gmail.com">Email: igr.btn@gmail.com</a><br>
+<a href="https://mxlab.uz">Website: mxlab.uz</a><br>
+<a href="https://t.me/igrbtn">Telegram: @igrbtn</a>
+</p>
+
+<h3>Support:</h3>
+<p>
+<a href="https://www.buymeacoffee.com/igrbtnv">
+<img src="https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=&slug=igrbtnv&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff" alt="Buy Me A Coffee">
+</a>
+</p>
+<p><a href="https://www.buymeacoffee.com/igrbtnv">buymeacoffee.com/igrbtnv</a></p>
+
+<hr>
+<p><small>Built with Python, PyQt6, and pyesedb</small></p>
+"""
+        msg = QMessageBox(self)
+        msg.setWindowTitle("About Exchange EDB Exporter")
+        msg.setTextFormat(Qt.TextFormat.RichText)
+        msg.setText(about_text)
+        msg.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        msg.exec()
 
     def closeEvent(self, event):
         if self.db:
