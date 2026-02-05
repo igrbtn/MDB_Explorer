@@ -16,6 +16,17 @@ A Python GUI application for viewing and exporting emails from Microsoft Exchang
 - **Multi-encoding support** (UTF-8, Cyrillic Windows-1251, KOI8-R, etc.)
 - Support for hidden/system items toggle
 
+## Screenshots
+
+### Main Interface
+![Main Page](screenshots/MainPage.png)
+
+### Mailbox Picker
+![Mailbox Picker](screenshots/MailboxPicker.png)
+
+### Export Mailbox Dialog
+![Export Mailbox](screenshots/ExportMailbox.png)
+
 ## Requirements
 
 - Python 3.10+
