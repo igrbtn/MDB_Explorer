@@ -6,7 +6,7 @@ A Python GUI application for viewing and exporting emails from Microsoft Exchang
 
 - **Browse mailbox folder structure** with proper folder names
 - **View messages** with From, To, Subject, Date fields
-- **Display email body** (text and HTML views with QWebEngineView)
+- **Display email body** (text and HTML views)
 - **Extract and save attachments** (including large Long Value attachments)
 - **Export emails as EML format** (with body, headers, and attachments)
 - **Export entire folders** to EML files
@@ -18,24 +18,49 @@ A Python GUI application for viewing and exporting emails from Microsoft Exchang
 
 ## Requirements
 
-```
-Python 3.8+
-PyQt6
-PyQt6-WebEngine (for HTML rendering)
-pyesedb (libesedb-python)
-dissect.esedb (for LZXPRESS decompression)
-```
+- Python 3.10+
+- PyQt6
+- libesedb-python (pyesedb)
+- dissect.esedb (for LZXPRESS decompression)
 
 ## Installation
 
-```bash
-pip install PyQt6 PyQt6-WebEngine libesedb-python dissect.esedb
+### Windows
+
+1. Install Python 3.10+ from [python.org](https://www.python.org/downloads/)
+   - **Important:** Check "Add Python to PATH" during installation
+
+2. Clone and run install script:
+```cmd
+git clone https://github.com/igrbtn/MDB_Explorer.git
+cd MDB_Explorer
+install_windows.bat
 ```
 
-Or use the install script:
+### macOS
+
+1. Run install script (installs Homebrew and Python if needed):
 ```bash
-./install.sh   # Linux/macOS
-install.bat    # Windows
+git clone https://github.com/igrbtn/MDB_Explorer.git
+cd MDB_Explorer
+chmod +x install_mac.sh
+./install_mac.sh
+```
+
+### Ubuntu/Debian
+
+1. Run install script:
+```bash
+git clone https://github.com/igrbtn/MDB_Explorer.git
+cd MDB_Explorer
+chmod +x install_ubuntu.sh
+./install_ubuntu.sh
+```
+
+### Manual Installation
+
+```bash
+pip install PyQt6 libesedb-python dissect.esedb python-dateutil chardet
 ```
 
 ## Usage
@@ -121,9 +146,10 @@ edb_exporter/
 ├── src/
 │   └── core/
 │       └── ese_reader.py # ESE database utilities
-├── requirements.txt
-├── install.sh / install.bat
-└── run.sh / run.bat
+├── requirements.txt      # Python dependencies
+├── install_windows.bat   # Windows install script
+├── install_mac.sh        # macOS install script
+└── install_ubuntu.sh     # Ubuntu/Debian install script
 ```
 
 ## Data Flow
