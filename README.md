@@ -46,25 +46,9 @@ python gui_viewer_v2.py [path_to_edb_file]
 
 Or launch without arguments and use the Browse button to select an EDB file.
 
-## Project Structure
+---
 
-```
-edb_exporter/
-├── gui_viewer_v2.py      # Main GUI application
-├── email_message.py      # Email extraction and EML export
-├── calendar_message.py   # Calendar extraction and ICS export
-├── lzxpress.py          # LZXPRESS decompression utilities
-├── folder_mapping.py    # Folder name mapping
-├── cli.py               # Command-line interface
-├── src/
-│   └── core/
-│       └── ese_reader.py  # ESE database utilities
-├── requirements.txt
-├── install.sh / install.bat
-└── run.sh / run.bat
-```
-
-## Architecture
+# Application Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -80,63 +64,418 @@ edb_exporter/
 │  │   Tree    │  │  ┌────────────────┐  │  │  ┌─────────────────┐  │ │
 │  │           │  │  │ Search/Filter  │  │  │  │ Body (Text)     │  │ │
 │  │ - Inbox   │  │  └────────────────┘  │  │  │ Body (HTML)     │  │ │
-│  │ - Sent    │  │  # Date From To Subj │  │  │ Parsed Data     │  │ │
-│  │ - Drafts  │  │  1 2026 Admin...     │  │  │ Attachments     │  │ │
-│  │ - ...     │  │  2 2026 User...      │  │  │ All Columns     │  │ │
-│  └───────────┘  └──────────────────────┘  └───────────────────────┘ │
+│  │ - Sent    │  │  # Date From To Subj │  │  │ HTML Source     │  │ │
+│  │ - Drafts  │  │  1 2026 Admin...     │  │  │ Raw Body        │  │ │
+│  │ - Deleted │  │  2 2026 User...      │  │  │ Parsed Data     │  │ │
+│  │ - ...     │  │                      │  │  │ Attachments     │  │ │
+│  └───────────┘  └──────────────────────┘  │  │ All Columns     │  │ │
+│                                           │  └─────────────────┘  │ │
+│                                           └───────────────────────┘ │
 ├─────────────────────────────────────────────────────────────────────┤
 │  Export: [EML] [Attachments] [Folder] [Calendar (.ics)]             │
+├─────────────────────────────────────────────────────────────────────┤
+│                          Status Bar                                 │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                      Core Data Layer                                │
+├─────────────────────────────────────────────────────────────────────┤
+│  ┌──────────────────┐    ┌──────────────────┐                       │
+│  │   LoadWorker     │    │   Data Models    │                       │
+│  │   (QThread)      │    │                  │                       │
+│  │                  │    │  - EmailMessage  │                       │
+│  │  - Open EDB      │    │  - CalendarEvent │                       │
+│  │  - Scan tables   │    │  - Attachment    │                       │
+│  │  - Detect MBs    │    │                  │                       │
+│  │  - Get owner     │    │                  │                       │
+│  └──────────────────┘    └──────────────────┘                       │
+├─────────────────────────────────────────────────────────────────────┤
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │                    pyesedb Library                            │   │
+│  │                                                               │   │
+│  │  - ESE database parsing                                       │   │
+│  │  - Table/Column/Record access                                 │   │
+│  │  - Long Value (LV) retrieval via get_value_data_as_long_value │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+├─────────────────────────────────────────────────────────────────────┤
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │                  dissect.esedb Library                        │   │
+│  │                                                               │   │
+│  │  - ESE column decompression (7-bit, LZXPRESS)                 │   │
+│  │  - Proper MS-XCA LZXPRESS for NativeBody HTML                 │   │
+│  │  - Mailbox owner name decompression                           │   │
+│  └──────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-## Key Modules
+## Project Structure
 
-### `email_message.py`
-- `EmailMessage` - dataclass for email data
+```
+edb_exporter/
+├── gui_viewer_v2.py      # Main GUI application
+├── email_message.py      # Email extraction and EML export
+├── calendar_message.py   # Calendar extraction and ICS export
+├── lzxpress.py           # LZXPRESS decompression utilities
+├── folder_mapping.py     # Folder name mapping
+├── cli.py                # Command-line interface
+├── src/
+│   └── core/
+│       └── ese_reader.py # ESE database utilities
+├── requirements.txt
+├── install.sh / install.bat
+└── run.sh / run.bat
+```
+
+## Data Flow
+
+```
+EDB File → pyesedb → Tables Dict → Folder/Message Indexing → GUI Display
+                                          ↓
+                    ┌─────────────────────┴─────────────────────┐
+                    ↓                                           ↓
+          Attachment extraction                          Body extraction
+          (Long Value B+ tree)                     (LZXPRESS decompression)
+                    ↓                                           ↓
+              EML Export                              HTML/Text Display
+                    ↓
+            Calendar ICS Export
+```
+
+---
+
+# Microsoft Exchange EDB Database Structure
+
+## Overview
+
+Exchange Server stores mailbox data in EDB files using Microsoft's **Extensible Storage Engine (ESE)**, also known as JET Blue. The database contains multiple tables organized by mailbox number.
+
+## Database Layout
+
+```
+Exchange EDB File
+│
+├── System Tables
+│   ├── MSysObjects        (Table catalog)
+│   ├── MSysObjids         (Object IDs)
+│   ├── MSysLocales        (Locale info)
+│   └── MSysDatabaseMaintenance
+│
+├── Global Tables
+│   ├── GlobalLocaleIds
+│   ├── Mailbox            (Mailbox metadata - owner names)
+│   ├── MailboxIdentity
+│   └── Events             (Transaction log)
+│
+└── Per-Mailbox Tables (XXX = mailbox number, e.g., 101, 103)
+    ├── Folder_XXX         (Folder definitions)
+    ├── Message_XXX        (Email messages)
+    ├── Attachment_XXX     (File attachments)
+    ├── Recipient_XXX      (Recipients)
+    └── ...other tables
+```
+
+## Key Tables
+
+### Mailbox Table
+
+Stores mailbox metadata including owner display name.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `MailboxNumber` | Long | Unique mailbox identifier (100, 101, 102...) |
+| `MailboxGuid` | Binary(16) | Mailbox GUID |
+| `MailboxOwnerDisplayName` | LongText | Owner name (compressed) |
+| `DisplayName` | LongText | Display name (compressed) |
+| `MessageCount` | LongLong | Total message count |
+| `LastLogonTime` | DateTime | Last logon timestamp |
+
+**Decompression:** Owner names are compressed using ESE 7-bit encoding. Use `dissect.esedb.compression.decompress()` then decode as UTF-16-LE.
+
+```python
+from dissect.esedb.compression import decompress
+decompressed = decompress(raw_value)
+owner_name = decompressed.decode('utf-16-le').rstrip('\x00')
+```
+
+### Folder_XXX Table
+
+Stores folder hierarchy and metadata.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `FolderId` | Binary(26) | Unique folder identifier |
+| `ParentFolderId` | Binary(26) | Parent folder reference |
+| `DisplayName` | LongText | Folder name (UTF-16LE, often compressed) |
+| `SpecialFolderNumber` | Long | Standard folder type (see below) |
+| `MessageCount` | Long | Number of messages |
+
+**Special Folder Numbers:**
+```
+1  = Root
+9  = IPM Subtree (Top of Information Store)
+10 = Inbox
+11 = Outbox
+12 = Sent Items
+13 = Deleted Items
+14 = Contacts
+15 = Calendar
+16 = Drafts
+17 = Journal
+18 = Notes
+19 = Tasks
+20 = Recoverable Items
+21 = Recoverable Items - Deletions
+22 = Recoverable Items - Versions
+```
+
+### Message_XXX Table
+
+Stores email messages and calendar items.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `MessageDocumentId` | Long | Unique message ID |
+| `FolderId` | Binary(26) | Parent folder |
+| `MessageClass` | LongText | Item type (compressed) |
+| `DateReceived` | DateTime | FILETIME format |
+| `DateSent` | DateTime | FILETIME format |
+| `IsRead` | Bit | Read status |
+| `IsHidden` | Bit | Hidden/system item flag |
+| `HasAttachments` | Bit | Attachment indicator |
+| `Importance` | Long | 0=Low, 1=Normal, 2=High |
+| `DisplayTo` | LongText | Recipients display |
+| `PropertyBlob` | LongBinary | MAPI properties (subject, sender, etc.) |
+| `NativeBody` | LongBinary | HTML body (LZXPRESS compressed) |
+| `SubobjectsBlob` | LongBinary | Attachment references |
+
+**Message Classes (decompressed):**
+```
+IPM.Note                           - Standard email
+IPM.Appointment                    - Calendar event
+IPM.Schedule.Meeting.Request       - Meeting request
+IPM.Schedule.Meeting.Resp.Pos      - Meeting accepted
+IPM.Schedule.Meeting.Resp.Neg      - Meeting declined
+IPM.Schedule.Meeting.Resp.Tent     - Meeting tentative
+IPM.Schedule.Meeting.Canceled      - Meeting canceled
+IPM.Task                           - Task item
+IPM.Contact                        - Contact
+IPM.Activity                       - Journal entry
+```
+
+### Attachment_XXX Table
+
+Stores file attachments.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `Inid` | LongLong | Unique attachment ID |
+| `AttachmentId` | Binary | Full attachment identifier |
+| `Content` | LongBinary | Attachment data or LV reference |
+| `Size` | LongLong | Attachment size in bytes |
+| `Name` | LongText | Filename (often compressed) |
+| `ContentType` | LongText | MIME type |
+| `PropertyBlob` | LongBinary | Attachment properties |
+
+---
+
+# Data Compression & Encoding
+
+## ESE Column Compression Types
+
+ESE uses different compression types indicated by the first byte:
+
+| Type Byte | Description |
+|-----------|-------------|
+| `0x10` | 7-bit ASCII compression |
+| `0x12` | 7-bit UTF-16 compression |
+| `0x15` | 7-bit variant |
+| `0x17` | Uncompressed or minimal compression |
+| `0x18` | LZXPRESS compressed (columns > 1KB) |
+| `0x19` | LZXPRESS variant |
+
+**Decompression with dissect.esedb:**
+```python
+from dissect.esedb.compression import decompress
+
+# Works for all compression types
+decompressed = decompress(raw_column_data)
+```
+
+## NativeBody (HTML Body) Format
+
+The NativeBody column contains HTML email content compressed with MS-XCA LZXPRESS.
+
+**Header Structure (7 bytes):**
+```
+Byte 0:    Type marker (0x18 = LZXPRESS)
+Bytes 1-2: Uncompressed size (little-endian 16-bit)
+Bytes 3+:  Compressed payload
+```
+
+**Decompression:**
+```python
+from dissect.esedb.compression import decompress
+
+html_bytes = decompress(native_body_data)  # Pass full data with header
+html_text = html_bytes.decode('utf-8')
+```
+
+## PropertyBlob Structure
+
+PropertyBlob contains MAPI properties including subject, sender, and message-id.
+
+```
+PropertyBlob Layout:
+┌──────────────────────────────────────────────────────────────┐
+│  Header bytes (property tags, types)                         │
+├──────────────────────────────────────────────────────────────┤
+│  ... metadata (GUIDs, addresses, timestamps) ...             │
+├──────────────────────────────────────────────────────────────┤
+│  Sender name ending with 'M' marker                          │
+│  Example: "Administrator" + 0x4D ('M')                       │
+├──────────────────────────────────────────────────────────────┤
+│  Subject: length byte + subject text                         │
+│  Example: 0x04 + "test" (4 bytes)                            │
+├──────────────────────────────────────────────────────────────┤
+│  Message-ID: <hex@domain>                                    │
+│  Example: <8f372b33baa04242a7fe@lab.sith.uz>                 │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Subject Extraction Pattern:**
+1. Find sender ending pattern: `atorM` (from "AdministratorM") or `StoneM` (from "Rosetta StoneM")
+2. Next byte is the subject length
+3. Following bytes are the subject text
+
+```python
+# Pattern: ...AdministratorM<length><subject>...
+pos = blob.find(b'atorM')
+if pos >= 0:
+    length = blob[pos + 5]  # Length byte after 'atorM'
+    subject = blob[pos + 6 : pos + 6 + length].decode('utf-8')
+```
+
+**Important:** Only extract subject when the proper pattern is found. Don't use fallback searches that might pick up system data (folder names, LDAP paths).
+
+## Long Value (LV) Storage
+
+Large binary data (>255 bytes) is stored in ESE's Long Value B+ tree:
+
+```
+Normal column value:
+┌─────────────────────┐
+│  Inline data        │
+│  (up to 255 bytes)  │
+└─────────────────────┘
+
+Long Value reference:
+┌─────────────────────┐      ┌─────────────────────┐
+│  4-byte LV ID       │ ───> │  Actual data in     │
+│  (reference)        │      │  LV B+ tree         │
+└─────────────────────┘      └─────────────────────┘
+
+Access via pyesedb:
+  record.is_long_value(column_idx)  → True/False
+  lv = record.get_value_data_as_long_value(column_idx)
+  data = lv.get_data()  → bytes
+```
+
+## SubobjectsBlob Format
+
+Links messages to their attachments:
+
+```
+Format 1 (0x21 markers):
+┌──────────┬──────────┬──────────┬──────────┐
+│  Header  │  0x21    │  Inid    │  0x21    │ ...
+│  bytes   │ (marker) │ (1 byte) │ (marker) │
+└──────────┴──────────┴──────────┴──────────┘
+
+Format 2 (0x0F format - Exchange 2013+):
+┌──────────┬──────────┬──────────┬──────────┐
+│   0x0F   │  Header  │  0x84    │  Inid+20 │ ...
+│ (length) │  bytes   │ (marker) │ (encoded)│
+└──────────┴──────────┴──────────┴──────────┘
+
+Inid values link to Attachment_XXX.Inid column
+```
+
+---
+
+# Key Modules
+
+## `email_message.py`
+
+**Classes:**
+- `EmailMessage` - dataclass for email data (subject, from, to, body, attachments)
 - `EmailExtractor` - extracts emails from EDB records
 - `EmailAttachment` - attachment data structure
-- Handles PropertyBlob parsing, body decompression, EML export
 
-### `calendar_message.py`
+**Key Methods:**
+- `extract_message(record, col_map, rec_idx)` - Extract complete email
+- `_extract_sender(blob)` - Extract sender from PropertyBlob
+- `_extract_subject(blob)` - Extract subject from PropertyBlob
+- `to_eml()` - Export to EML format
+
+## `calendar_message.py`
+
+**Classes:**
 - `CalendarEvent` - dataclass for calendar events
 - `CalendarExtractor` - extracts calendar items from EDB
-- `export_calendar_to_ics()` - exports to iCalendar format
-- Supports IPM.Appointment, IPM.Schedule.Meeting.*, IPM.Task
+- `CalendarAttendee` - attendee data
 
-### `lzxpress.py`
-- LZXPRESS decompression for NativeBody (HTML content)
-- Uses `dissect.esedb` for accurate decompression
-- Fallback decoder for systems without dissect
+**Key Methods:**
+- `is_calendar_item(message_class)` - Check if item is calendar type
+- `extract_event(record, col_map)` - Extract calendar event
+- `to_ics()` - Export to iCalendar format
+- `export_calendar_to_ics(events, path)` - Export multiple events
 
-## Exchange EDB Database Structure
+**Supported Message Classes:**
+- IPM.Appointment
+- IPM.Schedule.Meeting.Request
+- IPM.Schedule.Meeting.Resp.Pos/Neg/Tent
+- IPM.Schedule.Meeting.Canceled
+- IPM.Task
 
-### Key Tables (XXX = mailbox number)
+## `lzxpress.py`
 
-| Table | Description |
-|-------|-------------|
-| `Mailbox` | Mailbox metadata, owner display name |
-| `Folder_XXX` | Folder hierarchy and metadata |
-| `Message_XXX` | Email messages and calendar items |
-| `Attachment_XXX` | File attachments |
+**Functions:**
+- `decompress_exchange_body(data)` - Decompress NativeBody HTML
+- `extract_text_from_html(html_bytes)` - Extract plain text from HTML
+- `get_body_preview(native_data, max_len)` - Get text preview
+- `get_html_content(native_data)` - Get full HTML content
 
-### Special Folder Numbers
+**Decompression Priority:**
+1. Use `dissect.esedb.compression.decompress()` (most accurate)
+2. Fallback to built-in decoder if dissect unavailable
 
-| Number | Folder |
-|--------|--------|
-| 10 | Inbox |
-| 11 | Outbox |
-| 12 | Sent Items |
-| 13 | Deleted Items |
-| 14 | Contacts |
-| 15 | Calendar |
-| 16 | Drafts |
+---
 
-### Data Compression
+# DateTime Handling
 
-- **PropertyBlob**: Contains subject, sender, message-id (pattern-based extraction)
-- **NativeBody**: HTML body compressed with MS-XCA LZXPRESS
-- **Mailbox columns**: Compressed with ESE 7-bit encoding (decompressed via dissect.esedb)
+Exchange stores dates as Windows FILETIME (100-nanosecond intervals since 1601-01-01).
 
-## License
+```python
+import struct
+from datetime import datetime, timezone
+
+def filetime_to_datetime(filetime_bytes):
+    if len(filetime_bytes) != 8:
+        return None
+
+    filetime = struct.unpack('<Q', filetime_bytes)[0]
+    if filetime == 0:
+        return None
+
+    # FILETIME epoch difference (1601 to 1970)
+    EPOCH_DIFF = 116444736000000000
+    timestamp = (filetime - EPOCH_DIFF) / 10000000
+
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+```
+
+---
+
+# License
 
 MIT License
