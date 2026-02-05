@@ -65,11 +65,75 @@ pip install PyQt6 libesedb-python dissect.esedb python-dateutil chardet
 
 ## Usage
 
+### GUI Mode
+
 ```bash
 python gui_viewer_v2.py [path_to_edb_file]
 ```
 
 Or launch without arguments and use the Browse button to select an EDB file.
+
+### Command Line Mode
+
+```bash
+python cli.py <edb_file> <command> [options]
+```
+
+**Commands:**
+
+| Command | Description |
+|---------|-------------|
+| `info` | Show database information |
+| `list-mailboxes` | List all mailboxes |
+| `list-folders` | List folders in a mailbox |
+| `list-emails` | List/search emails |
+| `export-email` | Export single email to EML |
+| `export-folder` | Export folder to EML files |
+| `export-mailbox` | Export entire mailbox |
+| `export-calendar` | Export calendar to ICS |
+
+**Examples:**
+
+```bash
+# Show database info
+python cli.py database.edb info
+
+# List all mailboxes
+python cli.py database.edb list-mailboxes
+
+# Save mailboxes to CSV
+python cli.py database.edb list-mailboxes --csv mailboxes.csv
+
+# List folders in mailbox 103
+python cli.py database.edb list-folders -m 103
+
+# Search emails containing "invoice"
+python cli.py database.edb list-emails -m 103 -s "invoice"
+
+# List emails with date filter and save to CSV
+python cli.py database.edb list-emails -m 103 --date-from 2024-01-01 --date-to 2024-12-31 --csv emails.csv
+
+# Export single email
+python cli.py database.edb export-email -m 103 -r 318 -o email.eml
+
+# Export entire mailbox with folder structure
+python cli.py database.edb export-mailbox -m 103 -o ./exported
+
+# Export calendar to ICS
+python cli.py database.edb export-calendar -m 103 -o calendar.ics
+```
+
+**Options:**
+
+- `-m, --mailbox` - Mailbox number
+- `-f, --folder` - Folder ID
+- `-s, --search` - Search in subject/from/to
+- `-n, --limit` - Limit number of results
+- `--date-from` - Filter from date (YYYY-MM-DD)
+- `--date-to` - Filter to date (YYYY-MM-DD)
+- `--csv` - Save output to CSV file
+- `-o, --output` - Output file/directory
+- `-v, --verbose` - Verbose output
 
 ---
 
