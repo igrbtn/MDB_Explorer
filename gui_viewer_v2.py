@@ -2156,7 +2156,7 @@ a {{ color: #0066cc; }}
         # Check if message has attachments
         has_attach = get_bytes_value(record, col_map.get('HasAttachments', -1))
         if not has_attach or has_attach == b'\x00':
-            self.content_tabs.setTabText(7, "Attachments (0)")
+            self.content_tabs.setTabText(2, "Attachments (0)")
             return
 
         # Get SubobjectsBlob for attachment linking
@@ -2168,7 +2168,7 @@ a {{ color: #0066cc; }}
         attach_table = self.tables.get(attach_table_name)
 
         if not attach_table:
-            self.content_tabs.setTabText(7, "Attachments (0)")
+            self.content_tabs.setTabText(2, "Attachments (0)")
             return
 
         attach_col_map = get_column_map(attach_table)
@@ -2328,7 +2328,7 @@ a {{ color: #0066cc; }}
                 pass
 
         count = len(self.current_attachments)
-        self.content_tabs.setTabText(7, f"Attachments ({count})")
+        self.content_tabs.setTabText(2, f"Attachments ({count})")
 
         if count > 0:
             self.export_attach_btn.setEnabled(True)
