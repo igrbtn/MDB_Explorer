@@ -86,12 +86,24 @@ if errorlevel 1 (
     echo.
     echo Your Python version: %PYMAJOR%.%PYMINOR%
     echo.
-    echo Pre-built wheels are available for Python 3.10, 3.11, 3.12
+    echo Pre-built wheels are only available for Python 3.8-3.12.
+    echo Python 3.13+ is NOT supported yet.
     echo.
-    echo Options:
-    echo 1. Install Python 3.12 from python.org (recommended)
-    echo 2. Install Visual C++ Build Tools to compile from source
+    echo ==========================================
+    echo  SOLUTION: Install Python 3.12
+    echo ==========================================
     echo.
+    echo 1. Download Python 3.12 from:
+    echo    https://www.python.org/downloads/release/python-3120/
+    echo.
+    echo 2. During installation:
+    echo    - Check "Add Python to PATH"
+    echo    - Click "Customize installation"
+    echo    - Check "Install for all users"
+    echo.
+    echo 3. Run this script again
+    echo.
+    echo ==========================================
     pause
     exit /b 1
 )

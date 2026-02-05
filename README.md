@@ -38,9 +38,9 @@ A Python GUI application for viewing and exporting emails from Microsoft Exchang
 
 ### Windows
 
-1. Install Python 3.10, 3.11, or 3.12 from [python.org](https://www.python.org/downloads/)
+1. Install **Python 3.12** from [python.org](https://www.python.org/ftp/python/3.12.0/python-3.12.0-amd64.exe)
    - **Important:** Check "Add Python to PATH" during installation
-   - Pre-built wheels are available for these Python versions
+   - **Note:** Python 3.13+ is NOT supported (no pre-built wheels available)
 
 2. Clone and run install script:
 ```cmd
