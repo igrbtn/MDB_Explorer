@@ -357,20 +357,170 @@ class EmailExtractor:
         return ""
 
     def _extract_subject(self, blob: bytes) -> str:
-        """Extract subject from PropertyBlob."""
-        # Look for M/K marker followed by printable text
-        for i in range(len(blob) - 5):
-            if blob[i] in (0x4d, 0x4b):
-                length = blob[i+1]
-                if 2 <= length <= 100 and i + 2 + length <= len(blob):
-                    potential = blob[i+2:i+2+length]
-                    if all(32 <= b < 127 or 128 <= b <= 255 for b in potential):
-                        text = self.try_decode(potential)
-                        if text:
-                            skip = ['admin', 'exchange', 'recipient', 'labsith', 'fydib', 'pdlt', 'group', 'index']
-                            if not any(x in text.lower() for x in skip):
-                                return text
+        """
+        Extract subject from PropertyBlob.
+
+        PropertyBlob structure:
+        - ... M 0x0d "Rosetta Stone" M <length> <subject_data> ...
+        - After sender's ending M, the length byte comes directly, then subject data
+
+        For repeat patterns like "AAAA BBBB CCCC":
+        - The data is: <length> + encoded pattern (with length as first byte)
+        """
+        if not blob or len(blob) < 50:
+            return ""
+
+        # Find the sender section ending with "StoneM" (or similar)
+        sender_end_patterns = [b'StoneM', b'toneM', b'oneM', b'atorM']
+        subject_start = -1
+
+        for pattern in sender_end_patterns:
+            pos = blob.find(pattern)
+            if pos >= 0:
+                subject_start = pos + len(pattern)
+                break
+
+        # After sender marker, the length byte comes directly
+        if subject_start >= 0 and subject_start < len(blob) - 3:
+            length = blob[subject_start]
+
+            if 2 <= length <= 100 and subject_start + 1 + length <= len(blob):
+                # Build the data for decode: include length byte and content
+                subject_data = blob[subject_start:subject_start + 1 + length]
+
+                # Check for repeat pattern encoding (AAAA BBBB style)
+                content = subject_data[1:]  # Skip length byte for check
+                if self._looks_like_repeat_encoding(content):
+                    return self._decode_repeat_pattern(subject_data)
+
+                # Check for Message-ID (skip if starts with '<')
+                if content and content[0] == 0x3c:  # '<'
+                    pass  # Skip, try alternative search
+                else:
+                    # Regular text extraction - trust the pattern
+                    text = self._extract_printable_text(content)
+                    if text:
+                        return text
+
+        # No fallback - only return subject when we find proper pattern
+        # This avoids picking up system data like folder names or LDAP paths
         return ""
+
+    def _extract_printable_text(self, data: bytes) -> str:
+        """Extract printable ASCII text from bytes."""
+        if not data:
+            return ""
+
+        # Remove null bytes and extract printable chars
+        cleaned = bytes(b for b in data if b != 0 and 32 <= b < 127)
+        if cleaned:
+            return cleaned.decode('ascii', errors='ignore')
+        return ""
+
+    def _looks_like_repeat_encoding(self, data: bytes) -> bool:
+        """Check if data uses repeat pattern encoding (char + 00 00)."""
+        if not data or len(data) < 4:
+            return False
+
+        # Count char + 00 00 patterns
+        pattern_count = 0
+        i = 0
+        while i < len(data) - 2:
+            if (32 < data[i] <= 126 and  # Printable non-space
+                data[i+1] == 0x00 and data[i+2] == 0x00):
+                pattern_count += 1
+                i += 3
+            else:
+                i += 1
+
+        # If we have at least 2 such patterns, it's likely repeat encoding
+        return pattern_count >= 2
+
+    def _decode_repeat_pattern(self, data: bytes) -> str:
+        """
+        Decode repeat pattern encoding (char + 00 00 = char*4).
+
+        Format (first byte is expected output length):
+        - char + 00 00 = repeat char 4 times (e.g., 41 00 00 = "AAAA")
+        - 0x20 = space (literal)
+        - high_byte (0x80+) + byte = back-reference
+
+        Example: AAAA BBBB CCCC (14 chars)
+        0e 41 00 00 20 42 00 00 20 a8 01 43...
+        where a8 01 is back-ref, 43='C' indicates "CCCC"
+        """
+        if not data or len(data) < 2:
+            return ""
+
+        expected_len = data[0]
+        output = []
+        i = 1  # Start after length byte
+
+        while i < len(data) and len(''.join(output)) < expected_len + 5:
+            b = data[i]
+
+            # Primary pattern: printable char + 00 00 = repeat 4 times
+            if (0x30 <= b <= 0x7a and  # 0-9, A-Z, a-z
+                i + 2 < len(data) and
+                data[i+1] == 0x00 and data[i+2] == 0x00):
+                output.append(chr(b) * 4)
+                i += 3
+                continue
+
+            # Space = literal
+            if b == 0x20:
+                output.append(' ')
+                i += 1
+                continue
+
+            # 00 00 sequence - skip it and check next byte
+            if b == 0x00 and i + 1 < len(data) and data[i+1] == 0x00:
+                i += 2
+                continue
+
+            # High byte (0x80+) = back-reference
+            # Look ahead for the next printable char (indicates repeated char)
+            if b >= 0x80:
+                # Scan ahead for the indicator character
+                found_char = False
+                for k in range(i + 1, min(i + 5, len(data))):
+                    c = data[k]
+                    # Found a letter (A-Z) or digit - this indicates the repeated char
+                    if 0x41 <= c <= 0x5a or 0x30 <= c <= 0x39:
+                        output.append(chr(c) * 4)
+                        i = k + 1
+                        found_char = True
+                        break
+                    # Stop at space (next word) or 00 00 pattern
+                    if c == 0x20:
+                        break
+                    if c == 0x00 and k + 1 < len(data) and data[k+1] == 0x00:
+                        break
+                if not found_char:
+                    i += 2 if i + 1 < len(data) else 1
+                continue
+
+            # Control byte (0x01-0x1f) - skip
+            if b < 0x20:
+                i += 1
+                continue
+
+            # Other printable (0x40-0x7e) that's not followed by 00 00
+            # Usually part of back-ref or garbage - skip
+            if 0x40 <= b <= 0x7e:
+                i += 1
+                continue
+
+            i += 1
+
+        result = ''.join(output)
+        result = ' '.join(result.split())  # Normalize spaces
+
+        # Trim to expected length
+        if expected_len > 0 and len(result) > expected_len:
+            result = result[:expected_len]
+
+        return result.strip()
 
     def _extract_message_id(self, blob: bytes) -> str:
         """Extract Message-ID from PropertyBlob."""

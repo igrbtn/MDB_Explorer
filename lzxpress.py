@@ -868,51 +868,55 @@ def decompress_exchange_body(data: bytes) -> bytes:
     """
     Decompress Exchange NativeBody data.
 
-    Exchange uses MS-XCA LZXPRESS compression. When dissect.esedb is available,
-    we use its proper implementation. Otherwise, fall back to our custom decoder.
+    Exchange uses various compression formats:
+    - 0x10, 0x12: 7-bit compression (plain text, UTF-16)
+    - 0x15: 7-bit compression variant
+    - 0x17: Plain/encrypted (no compression)
+    - 0x18, 0x19: LZXPRESS compressed
 
-    Header format (7 bytes):
-    - Byte 0: 0x18 or 0x19 (compressed), 0x17 (plain/encrypted)
-    - Bytes 1-2: Uncompressed size (little-endian 16-bit)
-    - Bytes 3-6: Flags/reserved
+    When dissect.esedb is available, we use it for all types as it handles
+    the full ESE compression specification.
 
     Args:
         data: Raw NativeBody data from Exchange
 
     Returns:
-        Decompressed HTML content
+        Decompressed content
     """
     if not data or len(data) < 7:
         return data
 
-    # Check for Exchange compression header
     header_type = data[0]
-    if header_type not in [0x17, 0x18, 0x19]:
-        # Not compressed or different format - return as-is
-        return data
 
-    if header_type == 0x17:
-        # Type 0x17 appears to be plain text or encrypted - return raw
-        return data[7:] if len(data) > 7 else data
-
-    # Use dissect.esedb compression if available (proper LZXPRESS implementation)
+    # Try dissect.esedb FIRST for all compression types
+    # dissect handles 0x10, 0x12, 0x15, 0x18, 0x19 correctly
     if HAS_DISSECT:
         try:
             result = dissect_decompress(data)
-            return result
+            if result and len(result) > 0:
+                return result
         except Exception:
-            pass  # Fall back to custom decoder
+            pass  # Fall back to manual handling
 
-    # Get expected uncompressed size
-    uncompressed_size = struct.unpack('<H', data[1:3])[0]
+    # Fallback handling for specific types
+    if header_type == 0x17:
+        # Type 0x17: Plain text or encrypted - return raw content after header
+        return data[7:] if len(data) > 7 else data
 
-    # Skip 7-byte header for type 0x18/0x19
-    content = data[7:]
+    if header_type in [0x18, 0x19]:
+        # LZXPRESS compressed - use fallback decoder
+        uncompressed_size = struct.unpack('<H', data[1:3])[0]
+        content = data[7:]
+        output = _decompress_exchange_lz77(content, uncompressed_size)
+        return output
 
-    # Use Exchange-specific LZ77 decompression (fallback)
-    output = _decompress_exchange_lz77(content, uncompressed_size)
+    if header_type in [0x10, 0x12, 0x15]:
+        # 7-bit compression variants - try to extract content
+        # These should have been handled by dissect, but fallback to raw extraction
+        return data[7:] if len(data) > 7 else data
 
-    return output
+    # Unknown type - return as-is
+    return data
 
 
 def _decompress_exchange_lz77(data: bytes, expected_size: int = 0) -> bytes:
@@ -1093,6 +1097,23 @@ def extract_text_from_html(html_bytes: bytes) -> str:
     Returns:
         Extracted text content with preserved formatting
     """
+    if not html_bytes:
+        return ""
+
+    # Check for UTF-16 LE encoding (alternating null bytes)
+    # Pattern: non-null, null, non-null, null...
+    if len(html_bytes) >= 4:
+        is_utf16 = (html_bytes[1] == 0 and html_bytes[3] == 0 and
+                    html_bytes[0] != 0 and html_bytes[2] != 0)
+        if is_utf16:
+            try:
+                html = html_bytes.decode('utf-16-le').rstrip('\x00')
+                # If it's not HTML (no tags), return as plain text
+                if '<' not in html:
+                    return html.strip()
+            except:
+                pass
+
     # Try multiple encodings for HTML content
     html = try_decode_bytes(html_bytes)
     if not html:

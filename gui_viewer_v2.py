@@ -79,6 +79,14 @@ try:
 except ImportError:
     HAS_EMAIL_MODULE = False
 
+# Import calendar extraction module
+try:
+    from calendar_message import CalendarEvent, CalendarExtractor, export_calendar_to_ics, CALENDAR_MESSAGE_CLASSES
+    HAS_CALENDAR_MODULE = True
+except ImportError:
+    HAS_CALENDAR_MODULE = False
+    CALENDAR_MESSAGE_CLASSES = []
+
 
 # Supported encodings for text extraction
 # ASCII/UTF-8 encodings (for standard text)
@@ -613,80 +621,50 @@ class LoadWorker(QThread):
             self.error.emit(str(e))
 
     def _get_mailbox_owner(self, tables, mailbox_num):
-        """Try to get mailbox owner by analyzing messages."""
+        """Get mailbox owner from Mailbox table."""
         try:
-            msg_table = tables.get(f"Message_{mailbox_num}")
-            if not msg_table:
+            mailbox_table = tables.get('Mailbox')
+            if not mailbox_table:
                 return None
 
-            msg_col_map = get_column_map(msg_table)
-            total_records = msg_table.get_number_of_records()
+            col_map = get_column_map(mailbox_table)
+            mb_num_idx = col_map.get('MailboxNumber', -1)
+            owner_name_idx = col_map.get('MailboxOwnerDisplayName', -1)
+            display_name_idx = col_map.get('DisplayName', -1)
 
-            if total_records == 0:
-                return None
-
-            # Track different types of name patterns separately
-            admin_count = 0
-            user_counts = defaultdict(int)
-            real_name_counts = defaultdict(int)
-
-            sample_size = min(150, total_records)
-            step = max(1, total_records // sample_size)
-            indices = list(range(0, total_records, step))[:sample_size]
-
-            # System/technical terms to filter out
-            skip_patterns = {
-                'content type', 'exchange server', 'message id', 'entry client',
-                'exchange admin', 'administrative group', 'internet header',
-                'new permission', 'new permi', 'new perm', 'new pe', 'monitoring new',
-                'alex fin', 'alexey gro'  # Partial names - want full names
-            }
-
-            for i in indices:
+            for rec_idx in range(mailbox_table.get_number_of_records()):
                 try:
-                    rec = msg_table.get_record(i)
-                    if not rec:
+                    record = mailbox_table.get_record(rec_idx)
+                    if not record:
                         continue
 
-                    prop_blob = get_bytes_value(rec, msg_col_map.get('PropertyBlob', -1))
-                    if prop_blob:
-                        data_lower = prop_blob.lower()
+                    # Check if this is the requested mailbox
+                    mb_num_data = record.get_value_data(mb_num_idx)
+                    if mb_num_data:
+                        import struct
+                        mb_num = struct.unpack('<I', mb_num_data)[0]
+                        if mb_num != mailbox_num:
+                            continue
 
-                        # Check for Administrator
-                        if b'administrator' in data_lower:
-                            admin_count += 1
-
-                        text = prop_blob.decode('utf-8', errors='ignore')
-
-                        # Check for User patterns (User1, User0, etc.)
-                        user_matches = re.findall(r'\b(User\s*\d+)\b', text, re.IGNORECASE)
-                        for m in user_matches:
-                            normalized = re.sub(r'\s+', '', m)
-                            user_counts[normalized] += 1
-
-                        # Look for known real names (Alexey Gromov, Alex Finko, etc.)
-                        known_names = [
-                            'Alexey Gromov', 'Alex Finko', 'Alexey Podchufarov',
-                            'Konst Copikoshkin'
-                        ]
-                        for name in known_names:
-                            if name.lower() in text.lower():
-                                real_name_counts[name] += 1
+                    # Try to get owner name
+                    for col_idx in [owner_name_idx, display_name_idx]:
+                        if col_idx < 0:
+                            continue
+                        val = record.get_value_data(col_idx)
+                        if val and HAS_DISSECT:
+                            try:
+                                decompressed = dissect_decompress(val)
+                                for enc in ['utf-16-le', 'utf-8']:
+                                    try:
+                                        text = decompressed.decode(enc).rstrip('\x00')
+                                        if text:
+                                            return text
+                                    except:
+                                        pass
+                            except:
+                                pass
                 except:
                     pass
-
-            # Priority: 1. Administrator, 2. Known real names, 3. UserX
-            if admin_count >= 3:
-                return 'Administrator'
-
-            if real_name_counts:
-                return max(real_name_counts.items(), key=lambda x: x[1])[0]
-
-            if user_counts:
-                return max(user_counts.items(), key=lambda x: x[1])[0]
-
-            if admin_count > 0:
-                return 'Administrator'
 
             return None
         except:
@@ -710,6 +688,7 @@ class MainWindow(QMainWindow):
         self.current_email_data = {}
         self.current_email_message = None  # EmailMessage object for stable export
         self.email_extractor = None  # EmailExtractor instance
+        self.calendar_extractor = None  # CalendarExtractor instance
 
         self._setup_ui()
         self._setup_menu()
@@ -826,19 +805,63 @@ class MainWindow(QMainWindow):
         middle_layout = QVBoxLayout(middle_panel)
         middle_layout.setContentsMargins(0, 0, 0, 0)
 
-        middle_layout.addWidget(QLabel("Messages:"))
+        # Search and filter controls
+        search_layout = QHBoxLayout()
+        search_layout.setSpacing(5)
+
+        search_layout.addWidget(QLabel("Search:"))
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Type to search subject, from, to...")
+        self.search_input.textChanged.connect(self._on_search_changed)
+        self.search_input.setMaximumWidth(200)
+        search_layout.addWidget(self.search_input)
+
+        # Filter: Read status
+        self.filter_read_combo = QComboBox()
+        self.filter_read_combo.addItems(["All", "Unread", "Read"])
+        self.filter_read_combo.setMaximumWidth(80)
+        self.filter_read_combo.currentIndexChanged.connect(self._on_filter_changed)
+        search_layout.addWidget(QLabel("Status:"))
+        search_layout.addWidget(self.filter_read_combo)
+
+        # Filter: Has attachments
+        self.filter_attach_cb = QCheckBox("Has Attach")
+        self.filter_attach_cb.stateChanged.connect(self._on_filter_changed)
+        search_layout.addWidget(self.filter_attach_cb)
+
+        # Clear filters button
+        self.clear_filters_btn = QPushButton("Clear")
+        self.clear_filters_btn.setMaximumWidth(50)
+        self.clear_filters_btn.clicked.connect(self._on_clear_filters)
+        search_layout.addWidget(self.clear_filters_btn)
+
+        search_layout.addStretch()
+
+        # Message count label
+        self.msg_count_label = QLabel("")
+        self.msg_count_label.setStyleSheet("color: #666;")
+        search_layout.addWidget(self.msg_count_label)
+
+        middle_layout.addLayout(search_layout)
+
+        # Message list
         self.message_list = QTreeWidget()
-        self.message_list.setHeaderLabels(["#", "Date", "From", "To", "Subject", "Read"])
+        self.message_list.setHeaderLabels(["#", "Date", "From", "To", "Subject", "Att", "Read"])
         self.message_list.itemSelectionChanged.connect(self._on_message_selected)
         self.message_list.setMinimumWidth(500)
+        self.message_list.setSortingEnabled(True)
         # Set column widths
-        self.message_list.setColumnWidth(0, 50)   # #
-        self.message_list.setColumnWidth(1, 120)  # Date
-        self.message_list.setColumnWidth(2, 100)  # From
-        self.message_list.setColumnWidth(3, 100)  # To
-        self.message_list.setColumnWidth(4, 200)  # Subject
-        self.message_list.setColumnWidth(5, 40)   # Read
+        self.message_list.setColumnWidth(0, 45)   # #
+        self.message_list.setColumnWidth(1, 115)  # Date
+        self.message_list.setColumnWidth(2, 120)  # From
+        self.message_list.setColumnWidth(3, 120)  # To
+        self.message_list.setColumnWidth(4, 180)  # Subject
+        self.message_list.setColumnWidth(5, 30)   # Att
+        self.message_list.setColumnWidth(6, 35)   # Read
         middle_layout.addWidget(self.message_list)
+
+        # Store all messages for filtering
+        self.all_messages_cache = []
 
         # Export buttons
         export_layout = QHBoxLayout()
@@ -856,6 +879,12 @@ class MainWindow(QMainWindow):
         self.export_folder_btn.clicked.connect(self._on_export_folder)
         self.export_folder_btn.setEnabled(False)
         export_layout.addWidget(self.export_folder_btn)
+
+        self.export_calendar_btn = QPushButton("Export Calendar (.ics)")
+        self.export_calendar_btn.clicked.connect(self._on_export_calendar)
+        self.export_calendar_btn.setEnabled(False)
+        self.export_calendar_btn.setToolTip("Export calendar items from this folder to .ics file")
+        export_layout.addWidget(self.export_calendar_btn)
 
         middle_layout.addLayout(export_layout)
 
@@ -1036,6 +1065,7 @@ class MainWindow(QMainWindow):
         for mb in result['mailboxes']:
             owner = mb.get('owner_email', '')
             if owner:
+                # Show owner name without email
                 label = f"{owner} ({mb['message_count']} msgs)"
             else:
                 label = f"Mailbox {mb['number']} ({mb['message_count']} msgs)"
@@ -1330,82 +1360,67 @@ class MainWindow(QMainWindow):
         self.status.showMessage(f"Found {len(self.folders)} folders with {sum(folder_counts.values())} messages{owner_info}")
 
     def _detect_mailbox_owner(self):
-        """Detect mailbox owner by analyzing message senders."""
+        """Detect mailbox owner from Mailbox table."""
         self.mailbox_owner = None
         self.mailbox_email = None
 
-        msg_table_name = f"Message_{self.current_mailbox}"
-        msg_table = self.tables.get(msg_table_name)
-        if not msg_table:
-            self.owner_label.setText("")
-            return
+        # Read owner from Mailbox table
+        mailbox_table = self.tables.get('Mailbox')
+        if mailbox_table:
+            col_map = get_column_map(mailbox_table)
+            mb_num_idx = col_map.get('MailboxNumber', -1)
+            owner_name_idx = col_map.get('MailboxOwnerDisplayName', -1)
+            display_name_idx = col_map.get('DisplayName', -1)
 
-        col_map = get_column_map(msg_table)
-        total_records = msg_table.get_number_of_records()
+            for rec_idx in range(mailbox_table.get_number_of_records()):
+                try:
+                    record = mailbox_table.get_record(rec_idx)
+                    if not record:
+                        continue
 
-        if total_records == 0:
-            self.owner_label.setText("")
-            return
+                    # Check if this is the current mailbox
+                    mb_num_data = record.get_value_data(mb_num_idx)
+                    if mb_num_data:
+                        import struct
+                        mb_num = struct.unpack('<I', mb_num_data)[0]
+                        if mb_num != self.current_mailbox:
+                            continue
 
-        # Track different types of name patterns separately
-        admin_count = 0
-        user_counts = defaultdict(int)
-        real_name_counts = defaultdict(int)
+                    # Try to get owner name from MailboxOwnerDisplayName or DisplayName
+                    owner = None
+                    for col_idx in [owner_name_idx, display_name_idx]:
+                        if col_idx < 0:
+                            continue
+                        val = record.get_value_data(col_idx)
+                        if val and HAS_DISSECT:
+                            try:
+                                decompressed = dissect_decompress(val)
+                                # Try UTF-16-LE first (common for Exchange)
+                                for enc in ['utf-16-le', 'utf-8']:
+                                    try:
+                                        text = decompressed.decode(enc).rstrip('\x00')
+                                        # Skip system mailboxes
+                                        if text and 'SystemMailbox' not in text:
+                                            owner = text
+                                            break
+                                    except:
+                                        pass
+                                if owner:
+                                    break
+                            except:
+                                pass
 
-        sample_size = min(200, total_records)
-        step = max(1, total_records // sample_size)
-        indices = list(range(0, total_records, step))[:sample_size]
+                    if owner:
+                        self.mailbox_owner = owner
+                        owner_lower = owner.lower().replace(' ', '')
+                        self.mailbox_email = f"{owner_lower}@lab.sith.uz"
+                        self.owner_label.setText(f"Owner: {self.mailbox_owner} <{self.mailbox_email}>")
+                        break
+                except:
+                    pass
 
-        for i in indices:
-            try:
-                record = msg_table.get_record(i)
-                if not record:
-                    continue
-
-                prop_blob = get_bytes_value(record, col_map.get('PropertyBlob', -1))
-                if prop_blob:
-                    data_lower = prop_blob.lower()
-
-                    # Check for Administrator
-                    if b'administrator' in data_lower:
-                        admin_count += 1
-
-                    text = prop_blob.decode('utf-8', errors='ignore')
-
-                    # Check for User patterns (User1, User0, etc.)
-                    user_matches = re.findall(r'\b(User\s*\d+)\b', text, re.IGNORECASE)
-                    for m in user_matches:
-                        normalized = re.sub(r'\s+', '', m)
-                        user_counts[normalized] += 1
-
-                    # Look for known real names
-                    known_names = [
-                        'Alexey Gromov', 'Alex Finko', 'Alexey Podchufarov',
-                        'Konst Copikoshkin'
-                    ]
-                    for name in known_names:
-                        if name.lower() in text.lower():
-                            real_name_counts[name] += 1
-            except:
-                pass
-
-        # Priority: 1. Administrator, 2. Known real names, 3. UserX
-        owner = None
-        if admin_count >= 3:
-            owner = 'Administrator'
-        elif real_name_counts:
-            owner = max(real_name_counts.items(), key=lambda x: x[1])[0]
-        elif user_counts:
-            owner = max(user_counts.items(), key=lambda x: x[1])[0]
-        elif admin_count > 0:
-            owner = 'Administrator'
-
-        if owner:
-            self.mailbox_owner = owner
-            owner_lower = owner.lower().replace(' ', '')
-            self.mailbox_email = f"{owner_lower}@lab.sith.uz"
-            self.owner_label.setText(f"Owner: {self.mailbox_owner} <{self.mailbox_email}>")
-        else:
+        # Fallback if no owner found
+        if not self.mailbox_owner:
             self.mailbox_owner = ""
             self.mailbox_email = ""
             self.owner_label.setText(f"Mailbox {self.current_mailbox}")
@@ -1415,6 +1430,12 @@ class MainWindow(QMainWindow):
             self.email_extractor = EmailExtractor(self.mailbox_owner, self.mailbox_email)
         else:
             self.email_extractor = None
+
+        # Initialize calendar extractor
+        if HAS_CALENDAR_MODULE:
+            self.calendar_extractor = CalendarExtractor(self.mailbox_owner, self.mailbox_email)
+        else:
+            self.calendar_extractor = None
 
     def _index_messages(self):
         """Index messages by folder."""
@@ -1444,27 +1465,28 @@ class MainWindow(QMainWindow):
                 pass
 
     def _on_folder_selected(self):
-        """Handle folder selection."""
+        """Handle folder selection - load and cache all messages."""
         self.message_list.clear()
+        self.all_messages_cache = []
         self.export_folder_btn.setEnabled(False)
+        self.export_calendar_btn.setEnabled(False)
         self.export_eml_btn.setEnabled(False)
         self.export_eml_btn2.setEnabled(False)
         self.export_attach_btn.setEnabled(False)
 
         items = self.folder_tree.selectedItems()
         if not items:
+            self.msg_count_label.setText("")
             return
 
         folder_id = items[0].data(0, Qt.ItemDataRole.UserRole)
         self.export_folder_btn.setEnabled(True)
+        self.export_calendar_btn.setEnabled(HAS_CALENDAR_MODULE)
         message_indices = self.messages_by_folder.get(folder_id, [])
-
-        # Check if this is Sent Items folder (special_num = 12)
-        folder_info = self.folders.get(folder_id, {})
-        is_sent_items = folder_info.get('special_num') == 12 or folder_info.get('display_name', '').lower() == 'sent items'
 
         if not message_indices:
             self.status.showMessage(f"No messages in this folder")
+            self.msg_count_label.setText("0 messages")
             return
 
         msg_table_name = f"Message_{self.current_mailbox}"
@@ -1474,17 +1496,11 @@ class MainWindow(QMainWindow):
             return
 
         col_map = get_column_map(msg_table)
-
-        # Check if we should show hidden items
         show_hidden = self.show_hidden_cb.isChecked()
 
-        # Load messages (limit to 500)
-        shown_count = 0
+        # Load ALL messages into cache (limit to 1000)
         hidden_count = 0
-        for rec_idx in message_indices:
-            if shown_count >= 500:
-                break
-
+        for rec_idx in message_indices[:1000]:
             record = msg_table.get_record(rec_idx)
             if not record:
                 continue
@@ -1498,75 +1514,129 @@ class MainWindow(QMainWindow):
                 if not show_hidden:
                     continue
 
-            item = QTreeWidgetItem()
-            item.setText(0, str(rec_idx))
-            item.setData(0, Qt.ItemDataRole.UserRole, rec_idx)
-
             # Get date
             date_received = get_filetime_value(record, col_map.get('DateReceived', -1))
-            if date_received:
-                item.setText(1, date_received.strftime("%Y-%m-%d %H:%M"))
+            date_str = date_received.strftime("%Y-%m-%d %H:%M") if date_received else ""
 
-            # Get subject, sender and email from PropertyBlob
-            prop_blob = get_bytes_value(record, col_map.get('PropertyBlob', -1))
-            sender_name = ""
+            # Extract message data using EmailMessage for proper decryption
+            from_display = ""
+            to_display = ""
             subject = ""
-            if prop_blob:
-                sender_name = extract_sender_from_blob(prop_blob) or ""
-                subject = extract_subject_from_blob(prop_blob) or ""
 
-            # Validate sender - filter out Message-ID looking strings
-            if sender_name and not is_valid_sender_name(sender_name):
-                sender_name = ""
+            # Use EmailExtractor - same logic as message details view
+            if HAS_EMAIL_MODULE and self.email_extractor:
+                email_msg = self.email_extractor.extract_message(
+                    record, col_map, rec_idx,
+                    tables=self.tables, mailbox_num=self.current_mailbox
+                )
+                if email_msg:
+                    from_display = email_msg.get_from_header()
+                    to_display = email_msg.get_to_header()
+                    subject = email_msg.subject
 
-            # Fallback to mailbox owner if no valid sender
-            if not sender_name and hasattr(self, 'mailbox_owner') and self.mailbox_owner:
-                sender_name = self.mailbox_owner
+            # Final fallback for from/to if still empty
+            if not from_display and hasattr(self, 'mailbox_owner') and self.mailbox_owner:
+                from_display = f"{self.mailbox_owner} <{self.mailbox_owner.lower().replace(' ', '')}@lab.sith.uz>"
+            if not to_display and hasattr(self, 'mailbox_owner') and self.mailbox_owner:
+                to_display = f"{self.mailbox_owner} <{self.mailbox_owner.lower().replace(' ', '')}@lab.sith.uz>"
 
-            # Build sender display with email
-            if sender_name:
-                sender_display = f"{sender_name.lower().replace(' ', '')}@lab.sith.uz"
-            else:
-                sender_display = ""
+            # Get flags
+            is_read_raw = get_bytes_value(record, col_map.get('IsRead', -1))
+            is_read = bool(is_read_raw and is_read_raw != b'\x00')
 
-            # Get DisplayTo for recipient
-            display_to = get_string_value(record, col_map.get('DisplayTo', -1))
-            # Build recipient email
-            if display_to:
-                recipient_display = f"{display_to.lower().replace(' ', '')}@lab.sith.uz"
-            else:
-                recipient_display = ""
+            has_attach_raw = get_bytes_value(record, col_map.get('HasAttachments', -1))
+            has_attach = bool(has_attach_raw and has_attach_raw != b'\x00')
 
-            # In Sent Items: show To address in From column (who you sent to)
-            # In other folders: show From address (who sent to you)
-            if is_sent_items:
-                item.setText(2, recipient_display)  # Show recipient in From column
-                item.setText(3, sender_display)  # Show sender (yourself) in To column
-            else:
-                item.setText(2, sender_display)  # From
-                item.setText(3, recipient_display or sender_display)  # To
-            item.setText(4, subject)  # Subject
+            # Cache message data
+            msg_data = {
+                'rec_idx': rec_idx,
+                'date': date_str,
+                'date_obj': date_received,
+                'from': from_display,
+                'to': to_display,
+                'subject': subject,
+                'is_read': is_read,
+                'has_attach': has_attach,
+                'is_hidden': is_hidden_val,
+            }
+            self.all_messages_cache.append(msg_data)
 
-            # Get IsRead
-            is_read = get_bytes_value(record, col_map.get('IsRead', -1))
-            if is_read:
-                is_read_val = is_read != b'\x00'
-                item.setText(5, "Yes" if is_read_val else "No")
+        # Apply filters and display
+        self._apply_filters()
+
+        total = len(self.all_messages_cache)
+        self.msg_count_label.setText(f"{total} messages" + (f" ({hidden_count} hidden)" if hidden_count else ""))
+
+    def _apply_filters(self):
+        """Apply search and filter criteria to cached messages."""
+        self.message_list.clear()
+
+        search_text = self.search_input.text().lower().strip()
+        read_filter = self.filter_read_combo.currentIndex()  # 0=All, 1=Unread, 2=Read
+        attach_filter = self.filter_attach_cb.isChecked()
+
+        shown_count = 0
+        for msg in self.all_messages_cache:
+            # Apply search filter
+            if search_text:
+                searchable = f"{msg['subject']} {msg['from']} {msg['to']}".lower()
+                if search_text not in searchable:
+                    continue
+
+            # Apply read status filter
+            if read_filter == 1 and msg['is_read']:  # Unread only
+                continue
+            if read_filter == 2 and not msg['is_read']:  # Read only
+                continue
+
+            # Apply attachment filter
+            if attach_filter and not msg['has_attach']:
+                continue
+
+            # Create list item
+            item = QTreeWidgetItem()
+            item.setText(0, str(msg['rec_idx']))
+            item.setData(0, Qt.ItemDataRole.UserRole, msg['rec_idx'])
+            item.setText(1, msg['date'])
+            item.setText(2, msg['from'])  # Always show sender in From
+            item.setText(3, msg['to'])    # Always show recipient in To
+            item.setText(4, msg['subject'])
+            item.setText(5, "📎" if msg['has_attach'] else "")
+            item.setText(6, "✓" if msg['is_read'] else "")
 
             # Mark hidden items visually
-            if is_hidden_val:
-                item.setText(4, f"[HIDDEN] {item.text(4)}")
-                for col in range(6):
+            if msg['is_hidden']:
+                item.setText(4, f"[HIDDEN] {msg['subject']}")
+                for col in range(7):
                     item.setForeground(col, Qt.GlobalColor.gray)
 
             self.message_list.addTopLevelItem(item)
             shown_count += 1
 
-        visible_count = len(message_indices) - hidden_count
-        if show_hidden:
-            self.status.showMessage(f"Showing {shown_count} of {len(message_indices)} messages ({visible_count} visible, {hidden_count} hidden)")
+            if shown_count >= 500:
+                break
+
+        # Update status
+        total = len(self.all_messages_cache)
+        if shown_count < total:
+            self.status.showMessage(f"Showing {shown_count} of {total} messages (filtered)")
         else:
-            self.status.showMessage(f"Showing {shown_count} visible messages ({hidden_count} hidden items not shown)")
+            self.status.showMessage(f"Showing {shown_count} messages")
+
+    def _on_search_changed(self, text):
+        """Handle search input change."""
+        self._apply_filters()
+
+    def _on_filter_changed(self):
+        """Handle filter change."""
+        self._apply_filters()
+
+    def _on_clear_filters(self):
+        """Clear all search and filter criteria."""
+        self.search_input.clear()
+        self.filter_read_combo.setCurrentIndex(0)
+        self.filter_attach_cb.setChecked(False)
+        self._apply_filters()
 
     def _on_message_selected(self):
         """Handle message selection."""
@@ -1605,65 +1675,114 @@ class MainWindow(QMainWindow):
         # Load attachments
         self._load_attachments(rec_idx, record, col_map)
 
-        # === Parsed View ===
-        parsed_text = f"Record #{rec_idx}\n{'='*50}\n\n"
-
-        # Folder
+        # Get folder info
         folder_id = get_folder_id(record, col_map.get('FolderId', -1))
         folder_name = self.folders.get(folder_id, {}).get('display_name', 'Unknown')
-        parsed_text += f"Folder: {folder_name}\n"
 
-        # Dates
-        date_received = get_filetime_value(record, col_map.get('DateReceived', -1))
-        date_sent = get_filetime_value(record, col_map.get('DateSent', -1))
+        # === Create EmailMessage for structured extraction ===
+        email_msg = None
+        if HAS_EMAIL_MODULE and self.email_extractor:
+            email_msg = self.email_extractor.extract_message(
+                record, col_map, rec_idx,
+                folder_name=folder_name,
+                tables=self.tables,
+                mailbox_num=self.current_mailbox
+            )
+            self.current_email_message = email_msg
 
-        if date_received:
-            parsed_text += f"Date Received: {date_received}\n"
-        if date_sent:
-            parsed_text += f"Date Sent: {date_sent}\n"
+        # === Parsed View - use EmailMessage if available ===
+        parsed_text = f"Record #{rec_idx}\n{'='*50}\n\n"
 
-        # Flags
-        is_read = get_bytes_value(record, col_map.get('IsRead', -1))
-        if is_read:
-            is_read_val = is_read != b'\x00'
-            parsed_text += f"Is Read: {is_read_val}\n"
+        if email_msg:
+            # Use data from EmailMessage object
+            parsed_text += f"Folder: {email_msg.folder_name}\n"
 
-        has_attach = get_bytes_value(record, col_map.get('HasAttachments', -1))
-        if has_attach:
-            has_attach_val = has_attach != b'\x00'
-            parsed_text += f"Has Attachments: {has_attach_val}\n"
+            if email_msg.date_received:
+                parsed_text += f"Date Received: {email_msg.date_received}\n"
+            if email_msg.date_sent:
+                parsed_text += f"Date Sent: {email_msg.date_sent}\n"
 
-        # DisplayTo
-        display_to = get_string_value(record, col_map.get('DisplayTo', -1))
-        if display_to:
-            parsed_text += f"Display To: {display_to}\n"
+            parsed_text += f"Is Read: {email_msg.is_read}\n"
+            parsed_text += f"Has Attachments: {email_msg.has_attachments}\n"
 
-        # PropertyBlob Analysis
+            if email_msg.to_names:
+                parsed_text += f"Display To: {', '.join(email_msg.to_names)}\n"
+
+            parsed_text += f"\n--- Email Message Data ---\n"
+            parsed_text += f"\nSubject: {email_msg.subject or '(No Subject)'}\n"
+            parsed_text += f"From: {email_msg.get_from_header()}\n"
+            parsed_text += f"To: {email_msg.get_to_header() or '(unknown)'}\n"
+
+            if email_msg.message_id:
+                parsed_text += f"Message-ID: {email_msg.message_id}\n"
+
+            parsed_text += f"\nMessage Class: {email_msg.message_class}\n"
+
+            importance_map = {0: 'Low', 1: 'Normal', 2: 'High'}
+            parsed_text += f"Importance: {importance_map.get(email_msg.importance, 'Normal')}\n"
+
+            if email_msg.attachments:
+                parsed_text += f"\nAttachments ({len(email_msg.attachments)}):\n"
+                for att in email_msg.attachments:
+                    parsed_text += f"  - {att.filename} ({att.size} bytes)\n"
+
+        else:
+            # Fallback to old extraction methods
+            parsed_text += f"Folder: {folder_name}\n"
+
+            # Dates
+            date_received = get_filetime_value(record, col_map.get('DateReceived', -1))
+            date_sent = get_filetime_value(record, col_map.get('DateSent', -1))
+
+            if date_received:
+                parsed_text += f"Date Received: {date_received}\n"
+            if date_sent:
+                parsed_text += f"Date Sent: {date_sent}\n"
+
+            # Flags
+            is_read = get_bytes_value(record, col_map.get('IsRead', -1))
+            if is_read:
+                is_read_val = is_read != b'\x00'
+                parsed_text += f"Is Read: {is_read_val}\n"
+
+            has_attach = get_bytes_value(record, col_map.get('HasAttachments', -1))
+            if has_attach:
+                has_attach_val = has_attach != b'\x00'
+                parsed_text += f"Has Attachments: {has_attach_val}\n"
+
+            # DisplayTo
+            display_to = get_string_value(record, col_map.get('DisplayTo', -1))
+            if display_to:
+                parsed_text += f"Display To: {display_to}\n"
+
+            # PropertyBlob Analysis
+            if prop_blob:
+                parsed_text += f"\n--- PropertyBlob Analysis ({len(prop_blob)} bytes) ---\n"
+
+                # Extract Subject
+                subject = extract_subject_from_blob(prop_blob)
+                if subject:
+                    parsed_text += f"\nSubject: {subject}\n"
+
+                # Extract Sender
+                sender = extract_sender_from_blob(prop_blob)
+                # Validate sender - filter out Message-ID looking strings
+                if sender and not is_valid_sender_name(sender):
+                    sender = None
+                # Fallback to mailbox owner
+                if not sender and hasattr(self, 'mailbox_owner') and self.mailbox_owner:
+                    sender = self.mailbox_owner
+                if sender:
+                    parsed_text += f"From: {sender} <{sender.lower().replace(' ', '')}@lab.sith.uz>\n"
+                    parsed_text += f"To: {sender} <{sender.lower().replace(' ', '')}@lab.sith.uz>\n"
+
+                # Extract Message-ID
+                msgid = extract_message_id_from_blob(prop_blob)
+                if msgid:
+                    parsed_text += f"Message-ID: {msgid}\n"
+
+        # PropertyBlob hex info (always show)
         if prop_blob:
-            parsed_text += f"\n--- PropertyBlob Analysis ({len(prop_blob)} bytes) ---\n"
-
-            # Extract Subject
-            subject = extract_subject_from_blob(prop_blob)
-            if subject:
-                parsed_text += f"\nSubject: {subject}\n"
-
-            # Extract Sender
-            sender = extract_sender_from_blob(prop_blob)
-            # Validate sender - filter out Message-ID looking strings
-            if sender and not is_valid_sender_name(sender):
-                sender = None
-            # Fallback to mailbox owner
-            if not sender and hasattr(self, 'mailbox_owner') and self.mailbox_owner:
-                sender = self.mailbox_owner
-            if sender:
-                parsed_text += f"From: {sender} <{sender.lower().replace(' ', '')}@lab.sith.uz>\n"
-                parsed_text += f"To: {sender} <{sender.lower().replace(' ', '')}@lab.sith.uz>\n"
-
-            # Extract Message-ID
-            msgid = extract_message_id_from_blob(prop_blob)
-            if msgid:
-                parsed_text += f"Message-ID: {msgid}\n"
-
             # Find Exchange DN
             dn_match = re.search(rb'/O=[A-Z0-9]+/OU=[^/\x00]+(?:/CN=[^/\x00]+)*', prop_blob, re.IGNORECASE)
             if dn_match:
@@ -1829,19 +1948,7 @@ a {{ color: #0066cc; }}
             else:
                 self.columns_table.setItem(row, 2, QTableWidgetItem("(empty)"))
 
-        # Store email data for export
-        folder_id = get_folder_id(record, col_map.get('FolderId', -1))
-        folder_name = self.folders.get(folder_id, {}).get('display_name', 'Unknown')
-
-        subject = extract_subject_from_blob(prop_blob) if prop_blob else ""
-        sender = extract_sender_from_blob(prop_blob) if prop_blob else ""
-        msgid = extract_message_id_from_blob(prop_blob) if prop_blob else ""
-
-        has_attach = get_bytes_value(record, col_map.get('HasAttachments', -1))
-        has_attachments = bool(has_attach and has_attach != b'\x00')
-
-        date_sent = get_filetime_value(record, col_map.get('DateSent', -1))
-
+        # Store email data for export - use EmailMessage if available
         # Convert attachments to 3-tuple format for EML export (skip external references)
         eml_attachments = []
         for att in self.current_attachments:
@@ -1849,45 +1956,63 @@ a {{ color: #0066cc; }}
             if not is_external:
                 eml_attachments.append((att[0], att[1], att[2]))
 
-        # Use detected mailbox owner if sender not found
-        if not sender and hasattr(self, 'mailbox_owner') and self.mailbox_owner:
-            sender = self.mailbox_owner
-
-        # Get DisplayTo for recipient
-        display_to = get_string_value(record, col_map.get('DisplayTo', -1))
-        recipient_name = display_to if display_to else sender
-        recipient_email = f"{display_to}@lab.sith.uz" if display_to else (self.mailbox_email if hasattr(self, 'mailbox_email') else "unknown@lab.sith.uz")
-
-        self.current_email_data = {
-            'record_index': rec_idx,
-            'subject': subject,
-            'sender_name': sender,
-            'sender_email': self.mailbox_email if hasattr(self, 'mailbox_email') and self.mailbox_email else f"{sender}@lab.sith.uz" if sender else "unknown@lab.sith.uz",
-            'recipient_name': recipient_name,
-            'recipient_email': recipient_email,
-            'message_id': msgid,
-            'date_sent': date_sent,
-            'folder_name': folder_name,
-            'has_attachments': has_attachments,
-            'body_text': body_text if body_text else subject,  # Use extracted body, fallback to subject
-            'body_html': html_source,  # Include HTML source for EML export
-            'attachments': eml_attachments
-        }
-
-        # Create stable EmailMessage object for export
-        if HAS_EMAIL_MODULE and self.email_extractor:
-            self.current_email_message = self.email_extractor.extract_message(
-                record, col_map, rec_idx,
-                folder_name=folder_name,
-                tables=self.tables,
-                mailbox_num=self.current_mailbox
-            )
-            # Override with better extracted body if available
+        if email_msg:
+            # Use data from EmailMessage object
+            self.current_email_data = {
+                'record_index': email_msg.record_index,
+                'subject': email_msg.subject,
+                'sender_name': email_msg.sender_name,
+                'sender_email': email_msg.sender_email,
+                'recipient_name': email_msg.to_names[0] if email_msg.to_names else email_msg.sender_name,
+                'recipient_email': email_msg.to_emails[0] if email_msg.to_emails else email_msg.sender_email,
+                'message_id': email_msg.message_id,
+                'date_sent': email_msg.date_sent,
+                'folder_name': email_msg.folder_name,
+                'has_attachments': email_msg.has_attachments,
+                'body_text': body_text if body_text else email_msg.subject,
+                'body_html': html_source,
+                'attachments': eml_attachments
+            }
+            # Update EmailMessage with better body content
             if body_text:
-                self.current_email_message.body_text = body_text
+                email_msg.body_text = body_text
             if html_source:
-                self.current_email_message.body_html = html_source
+                email_msg.body_html = html_source
         else:
+            # Fallback to old extraction
+            subject = extract_subject_from_blob(prop_blob) if prop_blob else ""
+            sender = extract_sender_from_blob(prop_blob) if prop_blob else ""
+            msgid = extract_message_id_from_blob(prop_blob) if prop_blob else ""
+
+            has_attach = get_bytes_value(record, col_map.get('HasAttachments', -1))
+            has_attachments = bool(has_attach and has_attach != b'\x00')
+
+            date_sent = get_filetime_value(record, col_map.get('DateSent', -1))
+
+            # Use detected mailbox owner if sender not found
+            if not sender and hasattr(self, 'mailbox_owner') and self.mailbox_owner:
+                sender = self.mailbox_owner
+
+            # Get DisplayTo for recipient
+            display_to = get_string_value(record, col_map.get('DisplayTo', -1))
+            recipient_name = display_to if display_to else sender
+            recipient_email = f"{display_to}@lab.sith.uz" if display_to else (self.mailbox_email if hasattr(self, 'mailbox_email') else "unknown@lab.sith.uz")
+
+            self.current_email_data = {
+                'record_index': rec_idx,
+                'subject': subject,
+                'sender_name': sender,
+                'sender_email': self.mailbox_email if hasattr(self, 'mailbox_email') and self.mailbox_email else f"{sender}@lab.sith.uz" if sender else "unknown@lab.sith.uz",
+                'recipient_name': recipient_name,
+                'recipient_email': recipient_email,
+                'message_id': msgid,
+                'date_sent': date_sent,
+                'folder_name': folder_name,
+                'has_attachments': has_attachments,
+                'body_text': body_text if body_text else subject,
+                'body_html': html_source,
+                'attachments': eml_attachments
+            }
             self.current_email_message = None
 
     def _hexdump(self, data, width=16):
@@ -2383,6 +2508,89 @@ a {{ color: #0066cc; }}
         self.progress.setVisible(False)
         self.status.showMessage(f"Exported {exported} emails to {output_dir}")
         QMessageBox.information(self, "Export", f"Exported {exported} emails from {folder_name} to:\n{output_dir}")
+
+    def _on_export_calendar(self):
+        """Export calendar items from the current folder to .ics file."""
+        if not HAS_CALENDAR_MODULE:
+            QMessageBox.warning(self, "Export", "Calendar module not available")
+            return
+
+        items = self.folder_tree.selectedItems()
+        if not items:
+            QMessageBox.warning(self, "Export", "No folder selected")
+            return
+
+        folder_id = items[0].data(0, Qt.ItemDataRole.UserRole)
+        folder_name = self.folders.get(folder_id, {}).get('display_name', 'Unknown')
+        message_indices = self.messages_by_folder.get(folder_id, [])
+
+        if not message_indices:
+            QMessageBox.warning(self, "Export", "No messages in this folder")
+            return
+
+        msg_table_name = f"Message_{self.current_mailbox}"
+        msg_table = self.tables.get(msg_table_name)
+
+        if not msg_table:
+            return
+
+        col_map = get_column_map(msg_table)
+
+        # Collect calendar events
+        events = []
+        self.progress.setVisible(True)
+        self.progress.setRange(0, len(message_indices))
+
+        for idx, rec_idx in enumerate(message_indices):
+            self.progress.setValue(idx + 1)
+            QApplication.processEvents()
+
+            try:
+                record = msg_table.get_record(rec_idx)
+                if not record:
+                    continue
+
+                # Check if this is a calendar item
+                msg_class = self.calendar_extractor.get_message_class(record, col_map)
+                if not self.calendar_extractor.is_calendar_item(msg_class):
+                    continue
+
+                # Extract calendar event
+                event = self.calendar_extractor.extract_event(record, col_map, rec_idx)
+                if event:
+                    events.append(event)
+
+            except Exception as e:
+                self.status.showMessage(f"Error processing record {rec_idx}: {e}")
+
+        self.progress.setVisible(False)
+
+        if not events:
+            QMessageBox.information(self, "Export Calendar",
+                f"No calendar items found in '{folder_name}'.\n\n"
+                f"Calendar items have message class like:\n"
+                f"- IPM.Appointment\n"
+                f"- IPM.Schedule.Meeting.Request\n"
+                f"- IPM.Task")
+            return
+
+        # Ask for output file
+        output_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Calendar File",
+            f"{folder_name.replace(' ', '_')}_calendar.ics",
+            "iCalendar Files (*.ics);;All Files (*.*)"
+        )
+
+        if not output_path:
+            return
+
+        # Export to .ics
+        if export_calendar_to_ics(events, output_path):
+            self.status.showMessage(f"Exported {len(events)} calendar items to {output_path}")
+            QMessageBox.information(self, "Export Calendar",
+                f"Exported {len(events)} calendar items from '{folder_name}' to:\n{output_path}")
+        else:
+            QMessageBox.warning(self, "Export Error", "Failed to export calendar items")
 
     def _on_save_attachment(self):
         """Save selected attachment."""
