@@ -72,6 +72,13 @@ except ImportError:
     HAS_FOLDER_MAPPING = False
     SPECIAL_FOLDER_MAP = {}
 
+# Import stable email extraction module
+try:
+    from email_message import EmailMessage, EmailExtractor, EmailAttachment
+    HAS_EMAIL_MODULE = True
+except ImportError:
+    HAS_EMAIL_MODULE = False
+
 
 # Supported encodings for text extraction
 # ASCII/UTF-8 encodings (for standard text)
@@ -701,6 +708,8 @@ class MainWindow(QMainWindow):
         self.current_record_idx = None
         self.current_attachments = []  # List of (filename, content_type, data)
         self.current_email_data = {}
+        self.current_email_message = None  # EmailMessage object for stable export
+        self.email_extractor = None  # EmailExtractor instance
 
         self._setup_ui()
         self._setup_menu()
@@ -1397,7 +1406,15 @@ class MainWindow(QMainWindow):
             self.mailbox_email = f"{owner_lower}@lab.sith.uz"
             self.owner_label.setText(f"Owner: {self.mailbox_owner} <{self.mailbox_email}>")
         else:
+            self.mailbox_owner = ""
+            self.mailbox_email = ""
             self.owner_label.setText(f"Mailbox {self.current_mailbox}")
+
+        # Initialize email extractor with mailbox owner info
+        if HAS_EMAIL_MODULE:
+            self.email_extractor = EmailExtractor(self.mailbox_owner, self.mailbox_email)
+        else:
+            self.email_extractor = None
 
     def _index_messages(self):
         """Index messages by folder."""
@@ -1857,6 +1874,22 @@ a {{ color: #0066cc; }}
             'attachments': eml_attachments
         }
 
+        # Create stable EmailMessage object for export
+        if HAS_EMAIL_MODULE and self.email_extractor:
+            self.current_email_message = self.email_extractor.extract_message(
+                record, col_map, rec_idx,
+                folder_name=folder_name,
+                tables=self.tables,
+                mailbox_num=self.current_mailbox
+            )
+            # Override with better extracted body if available
+            if body_text:
+                self.current_email_message.body_text = body_text
+            if html_source:
+                self.current_email_message.body_html = html_source
+        else:
+            self.current_email_message = None
+
     def _hexdump(self, data, width=16):
         lines = []
         for i in range(0, len(data), width):
@@ -2174,7 +2207,31 @@ a {{ color: #0066cc; }}
             self.save_all_attach_btn.setEnabled(True)
 
     def _on_export_eml(self):
-        """Export current message as EML file."""
+        """Export current message as EML file using stable EmailMessage class."""
+        # Use new EmailMessage if available
+        if HAS_EMAIL_MODULE and self.current_email_message:
+            subject_safe = re.sub(r'[<>:"/\\|?*]', '_', self.current_email_message.subject or 'no_subject')[:50]
+            default_name = f"record_{self.current_record_idx}_{subject_safe}.eml"
+
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save Email as EML", default_name,
+                "Email Files (*.eml);;All Files (*.*)"
+            )
+
+            if not path:
+                return
+
+            try:
+                eml_content = self.current_email_message.to_eml()
+                with open(path, 'wb') as f:
+                    f.write(eml_content)
+                self.status.showMessage(f"Exported email to {path}")
+                QMessageBox.information(self, "Export", f"Email saved to:\n{path}")
+            except Exception as e:
+                QMessageBox.critical(self, "Export Error", f"Failed to export email:\n{e}")
+            return
+
+        # Fallback to old method
         if not self.current_email_data:
             QMessageBox.warning(self, "Export", "No message selected")
             return
