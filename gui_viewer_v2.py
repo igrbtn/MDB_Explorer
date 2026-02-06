@@ -1895,93 +1895,130 @@ class MainWindow(QMainWindow):
             )
             self.current_email_message = email_msg
 
-        # === Parsed View - use EmailMessage if available ===
-        parsed_text = f"Record #{rec_idx}\n{'='*50}\n\n"
+        # === Parsed View - Outlook-style message headers ===
+        parsed_text = ""
 
         if email_msg:
-            # Use data from EmailMessage object
+            # Outlook-style message header
+            parsed_text += "=" * 60 + "\n"
+
+            # From:
+            from_header = email_msg.get_from_header()
+            parsed_text += f"From:      {from_header if from_header else '(none)'}\n"
+
+            # To: (can be none, one or multiple)
+            to_header = email_msg.get_to_header()
+            parsed_text += f"To:        {to_header if to_header else '(none)'}\n"
+
+            # Cc: (Copy - can be none, one or multiple)
+            cc_header = email_msg.get_cc_header()
+            parsed_text += f"Cc:        {cc_header if cc_header else '(none)'}\n"
+
+            # Bcc: (can be none, one or multiple)
+            bcc_recipients = []
+            for i, email in enumerate(email_msg.bcc_emails):
+                name = email_msg.bcc_names[i] if i < len(email_msg.bcc_names) else ""
+                if name:
+                    bcc_recipients.append(f"{name} <{email}>")
+                else:
+                    bcc_recipients.append(email)
+            bcc_header = ", ".join(bcc_recipients) if bcc_recipients else ""
+            parsed_text += f"Bcc:       {bcc_header if bcc_header else '(none)'}\n"
+
+            # Subject:
+            parsed_text += f"Subject:   {email_msg.subject or '(No Subject)'}\n"
+
+            # Date:
+            msg_date = email_msg.date_sent or email_msg.date_received
+            if msg_date:
+                date_str = msg_date.strftime("%a, %d %b %Y %H:%M:%S %z") if hasattr(msg_date, 'strftime') else str(msg_date)
+            else:
+                date_str = "(none)"
+            parsed_text += f"Date:      {date_str}\n"
+
+            parsed_text += "=" * 60 + "\n\n"
+
+            # Additional metadata
+            parsed_text += f"--- Message Details ---\n"
             parsed_text += f"Folder: {email_msg.folder_name}\n"
+            parsed_text += f"Record: #{rec_idx}\n"
+            parsed_text += f"Read: {'Yes' if email_msg.is_read else 'No'}\n"
 
-            if email_msg.date_received:
-                parsed_text += f"Date Received: {email_msg.date_received}\n"
-            if email_msg.date_sent:
-                parsed_text += f"Date Sent: {email_msg.date_sent}\n"
-
-            parsed_text += f"Is Read: {email_msg.is_read}\n"
-            parsed_text += f"Has Attachments: {email_msg.has_attachments}\n"
-
-            if email_msg.to_names:
-                parsed_text += f"Display To: {', '.join(email_msg.to_names)}\n"
-
-            parsed_text += f"\n--- Email Message Data ---\n"
-            parsed_text += f"\nSubject: {email_msg.subject or '(No Subject)'}\n"
-            parsed_text += f"From: {email_msg.get_from_header()}\n"
-            parsed_text += f"To: {email_msg.get_to_header() or '(unknown)'}\n"
+            importance_map = {0: 'Low', 1: 'Normal', 2: 'High'}
+            parsed_text += f"Importance: {importance_map.get(email_msg.importance, 'Normal')}\n"
+            parsed_text += f"Message Class: {email_msg.message_class}\n"
 
             if email_msg.message_id:
                 parsed_text += f"Message-ID: {email_msg.message_id}\n"
 
-            parsed_text += f"\nMessage Class: {email_msg.message_class}\n"
-
-            importance_map = {0: 'Low', 1: 'Normal', 2: 'High'}
-            parsed_text += f"Importance: {importance_map.get(email_msg.importance, 'Normal')}\n"
-
             if email_msg.attachments:
-                parsed_text += f"\nAttachments ({len(email_msg.attachments)}):\n"
+                parsed_text += f"\n--- Attachments ({len(email_msg.attachments)}) ---\n"
                 for att in email_msg.attachments:
                     parsed_text += f"  - {att.filename} ({att.size} bytes)\n"
 
         else:
-            # Fallback to old extraction methods
-            parsed_text += f"Folder: {folder_name}\n"
+            # Fallback to old extraction methods - still use Outlook style
+            parsed_text += "=" * 60 + "\n"
 
-            # Dates
-            date_received = get_filetime_value(record, col_map.get('DateReceived', -1))
+            # Extract sender from PropertyBlob
+            sender = None
+            sender_email = ""
+            if prop_blob:
+                sender = extract_sender_from_blob(prop_blob)
+                if sender and not is_valid_sender_name(sender):
+                    sender = None
+            if not sender and hasattr(self, 'mailbox_owner') and self.mailbox_owner:
+                sender = self.mailbox_owner
+            if sender:
+                sender_email = f"{sender.lower().replace(' ', '')}@lab.sith.uz"
+
+            # From:
+            if sender:
+                parsed_text += f"From:      {sender} <{sender_email}>\n"
+            else:
+                parsed_text += f"From:      (none)\n"
+
+            # To:
+            display_to = get_string_value(record, col_map.get('DisplayTo', -1))
+            parsed_text += f"To:        {display_to if display_to else '(none)'}\n"
+
+            # Cc: and Bcc:
+            parsed_text += f"Cc:        (none)\n"
+            parsed_text += f"Bcc:       (none)\n"
+
+            # Subject:
+            subject = extract_subject_from_blob(prop_blob) if prop_blob else ""
+            parsed_text += f"Subject:   {subject if subject else '(No Subject)'}\n"
+
+            # Date:
             date_sent = get_filetime_value(record, col_map.get('DateSent', -1))
+            date_received = get_filetime_value(record, col_map.get('DateReceived', -1))
+            msg_date = date_sent or date_received
+            if msg_date:
+                date_str = msg_date.strftime("%a, %d %b %Y %H:%M:%S %z") if hasattr(msg_date, 'strftime') else str(msg_date)
+            else:
+                date_str = "(none)"
+            parsed_text += f"Date:      {date_str}\n"
 
-            if date_received:
-                parsed_text += f"Date Received: {date_received}\n"
-            if date_sent:
-                parsed_text += f"Date Sent: {date_sent}\n"
+            parsed_text += "=" * 60 + "\n\n"
 
-            # Flags
+            # Additional metadata
+            parsed_text += f"--- Message Details ---\n"
+            parsed_text += f"Folder: {folder_name}\n"
+            parsed_text += f"Record: #{rec_idx}\n"
+
             is_read = get_bytes_value(record, col_map.get('IsRead', -1))
             if is_read:
                 is_read_val = is_read != b'\x00'
-                parsed_text += f"Is Read: {is_read_val}\n"
+                parsed_text += f"Read: {'Yes' if is_read_val else 'No'}\n"
 
             has_attach = get_bytes_value(record, col_map.get('HasAttachments', -1))
             if has_attach:
                 has_attach_val = has_attach != b'\x00'
-                parsed_text += f"Has Attachments: {has_attach_val}\n"
+                parsed_text += f"Has Attachments: {'Yes' if has_attach_val else 'No'}\n"
 
-            # DisplayTo
-            display_to = get_string_value(record, col_map.get('DisplayTo', -1))
-            if display_to:
-                parsed_text += f"Display To: {display_to}\n"
-
-            # PropertyBlob Analysis
+            # Extract Message-ID
             if prop_blob:
-                parsed_text += f"\n--- PropertyBlob Analysis ({len(prop_blob)} bytes) ---\n"
-
-                # Extract Subject
-                subject = extract_subject_from_blob(prop_blob)
-                if subject:
-                    parsed_text += f"\nSubject: {subject}\n"
-
-                # Extract Sender
-                sender = extract_sender_from_blob(prop_blob)
-                # Validate sender - filter out Message-ID looking strings
-                if sender and not is_valid_sender_name(sender):
-                    sender = None
-                # Fallback to mailbox owner
-                if not sender and hasattr(self, 'mailbox_owner') and self.mailbox_owner:
-                    sender = self.mailbox_owner
-                if sender:
-                    parsed_text += f"From: {sender} <{sender.lower().replace(' ', '')}@lab.sith.uz>\n"
-                    parsed_text += f"To: {sender} <{sender.lower().replace(' ', '')}@lab.sith.uz>\n"
-
-                # Extract Message-ID
                 msgid = extract_message_id_from_blob(prop_blob)
                 if msgid:
                     parsed_text += f"Message-ID: {msgid}\n"
