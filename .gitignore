@@ -38,3 +38,4 @@ extracted_attachments/
 # Credentials
 *.env
 credentials*
+REDDIT_POST.md
