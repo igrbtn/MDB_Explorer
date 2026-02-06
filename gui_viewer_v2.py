@@ -994,6 +994,75 @@ class MainWindow(QMainWindow):
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
 
+        # Message header section (Outlook-style labels above tabs)
+        header_widget = QWidget()
+        header_widget.setStyleSheet("QWidget { background-color: #f5f5f5; border-bottom: 1px solid #ddd; }")
+        header_layout = QGridLayout(header_widget)
+        header_layout.setContentsMargins(8, 6, 8, 6)
+        header_layout.setSpacing(2)
+
+        # Create labels with bold field names
+        label_style = "font-weight: bold; color: #444;"
+        value_style = "color: #000;"
+
+        # From:
+        from_label = QLabel("From:")
+        from_label.setStyleSheet(label_style)
+        self.header_from = QLabel("(none)")
+        self.header_from.setStyleSheet(value_style)
+        self.header_from.setWordWrap(True)
+        header_layout.addWidget(from_label, 0, 0)
+        header_layout.addWidget(self.header_from, 0, 1)
+
+        # To:
+        to_label = QLabel("To:")
+        to_label.setStyleSheet(label_style)
+        self.header_to = QLabel("(none)")
+        self.header_to.setStyleSheet(value_style)
+        self.header_to.setWordWrap(True)
+        header_layout.addWidget(to_label, 1, 0)
+        header_layout.addWidget(self.header_to, 1, 1)
+
+        # Cc:
+        cc_label = QLabel("Cc:")
+        cc_label.setStyleSheet(label_style)
+        self.header_cc = QLabel("(none)")
+        self.header_cc.setStyleSheet(value_style)
+        self.header_cc.setWordWrap(True)
+        header_layout.addWidget(cc_label, 2, 0)
+        header_layout.addWidget(self.header_cc, 2, 1)
+
+        # Bcc:
+        bcc_label = QLabel("Bcc:")
+        bcc_label.setStyleSheet(label_style)
+        self.header_bcc = QLabel("(none)")
+        self.header_bcc.setStyleSheet(value_style)
+        self.header_bcc.setWordWrap(True)
+        header_layout.addWidget(bcc_label, 3, 0)
+        header_layout.addWidget(self.header_bcc, 3, 1)
+
+        # Subject:
+        subject_label = QLabel("Subject:")
+        subject_label.setStyleSheet(label_style)
+        self.header_subject = QLabel("(No Subject)")
+        self.header_subject.setStyleSheet(value_style + " font-weight: bold;")
+        self.header_subject.setWordWrap(True)
+        header_layout.addWidget(subject_label, 4, 0)
+        header_layout.addWidget(self.header_subject, 4, 1)
+
+        # Date:
+        date_label = QLabel("Date:")
+        date_label.setStyleSheet(label_style)
+        self.header_date = QLabel("(none)")
+        self.header_date.setStyleSheet(value_style)
+        header_layout.addWidget(date_label, 5, 0)
+        header_layout.addWidget(self.header_date, 5, 1)
+
+        # Make value column stretch
+        header_layout.setColumnStretch(1, 1)
+
+        right_layout.addWidget(header_widget)
+
         self.content_tabs = QTabWidget()
 
         # Body Plain Text tab - with word wrap
@@ -1894,6 +1963,68 @@ class MainWindow(QMainWindow):
                 mailbox_num=self.current_mailbox
             )
             self.current_email_message = email_msg
+
+        # === Update Header Labels (Outlook-style above tabs) ===
+        if email_msg:
+            # From:
+            from_header = email_msg.get_from_header()
+            self.header_from.setText(from_header if from_header else "(none)")
+
+            # To:
+            to_header = email_msg.get_to_header()
+            self.header_to.setText(to_header if to_header else "(none)")
+
+            # Cc:
+            cc_header = email_msg.get_cc_header()
+            self.header_cc.setText(cc_header if cc_header else "(none)")
+
+            # Bcc:
+            bcc_recipients = []
+            for i, email in enumerate(email_msg.bcc_emails):
+                name = email_msg.bcc_names[i] if i < len(email_msg.bcc_names) else ""
+                if name:
+                    bcc_recipients.append(f"{name} <{email}>")
+                else:
+                    bcc_recipients.append(email)
+            bcc_header = ", ".join(bcc_recipients) if bcc_recipients else "(none)"
+            self.header_bcc.setText(bcc_header)
+
+            # Subject:
+            self.header_subject.setText(email_msg.subject or "(No Subject)")
+
+            # Date:
+            msg_date = email_msg.date_sent or email_msg.date_received
+            if msg_date:
+                date_str = msg_date.strftime("%a, %d %b %Y %H:%M:%S %z") if hasattr(msg_date, 'strftime') else str(msg_date)
+            else:
+                date_str = "(none)"
+            self.header_date.setText(date_str)
+        else:
+            # Fallback - extract basic info
+            sender = extract_sender_from_blob(prop_blob) if prop_blob else None
+            if sender and not is_valid_sender_name(sender):
+                sender = None
+            if not sender and hasattr(self, 'mailbox_owner') and self.mailbox_owner:
+                sender = self.mailbox_owner
+
+            self.header_from.setText(f"{sender} <{sender.lower().replace(' ', '')}@lab.sith.uz>" if sender else "(none)")
+
+            display_to = get_string_value(record, col_map.get('DisplayTo', -1))
+            self.header_to.setText(display_to if display_to else "(none)")
+            self.header_cc.setText("(none)")
+            self.header_bcc.setText("(none)")
+
+            subject = extract_subject_from_blob(prop_blob) if prop_blob else ""
+            self.header_subject.setText(subject if subject else "(No Subject)")
+
+            date_sent = get_filetime_value(record, col_map.get('DateSent', -1))
+            date_received = get_filetime_value(record, col_map.get('DateReceived', -1))
+            msg_date = date_sent or date_received
+            if msg_date:
+                date_str = msg_date.strftime("%a, %d %b %Y %H:%M:%S %z") if hasattr(msg_date, 'strftime') else str(msg_date)
+            else:
+                date_str = "(none)"
+            self.header_date.setText(date_str)
 
         # === Parsed View - Outlook-style message headers ===
         parsed_text = ""
