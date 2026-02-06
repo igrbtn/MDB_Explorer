@@ -324,19 +324,36 @@ def is_valid_sender_name(name):
 
 
 def _is_valid_name(name):
-    """Check if extracted name looks valid (not hex/garbage)."""
+    """Check if extracted name looks valid (not hex/garbage/email)."""
     if not name or len(name) < 2:
         return False
-    # Filter out hex-like strings (e.g., "1aa15ee3d8bb699")
-    if len(name) > 8 and all(c in '0123456789abcdefABCDEF' for c in name.replace(' ', '')):
+
+    # Filter out email addresses
+    if '@' in name:
         return False
-    # Must have at least one letter
-    if not any(c.isalpha() for c in name):
+
+    # Filter out hex-like strings (e.g., "1aa15ee3d8bb699", "d5ed566d86865")
+    clean = name.replace(' ', '').replace('-', '').replace('_', '')
+    if len(clean) > 6 and all(c in '0123456789abcdefABCDEF' for c in clean):
         return False
-    # Filter out strings that are mostly digits
-    digit_count = sum(1 for c in name if c.isdigit())
-    if digit_count > len(name) * 0.5:
+
+    # Must have at least 2 letters
+    letter_count = sum(1 for c in name if c.isalpha())
+    if letter_count < 2:
         return False
+
+    # Filter out strings that are mostly digits/hex
+    alnum = [c for c in name if c.isalnum()]
+    if alnum:
+        digit_hex_count = sum(1 for c in alnum if c.isdigit() or c.lower() in 'abcdef')
+        if digit_hex_count > len(alnum) * 0.4:
+            return False
+
+    # Filter out system/group names
+    lower_name = name.lower()
+    if any(x in lower_name for x in ['administrative', 'system ', 'group']):
+        return False
+
     return True
 
 
