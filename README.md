@@ -1,20 +1,23 @@
-# Exchange EDB Viewer & Exporter
+# <img src="icon.png" width="32" height="32" style="vertical-align: middle;"> Exchange EDB Viewer & Exporter
 
 A Python GUI application for viewing and exporting emails from Microsoft Exchange EDB (Extensible Storage Engine Database) files.
 
 ## Features
 
+- **Dark mode UI** consistent across Windows and macOS
+- **Database statistics** displayed after loading (size, mailboxes, messages, tables)
 - **Browse mailbox folder structure** with proper folder names
-- **View messages** with From, To, Subject, Date fields
-- **Display email body** (text and HTML views)
+- **View messages** with From, To, Cc, Bcc, Subject, Date fields
+- **Display email body** (text and HTML views with white background for readability)
 - **Extract and save attachments** (including large Long Value attachments)
 - **Export emails as EML format** (with body, headers, and attachments)
 - **Export entire folders** to EML files
+- **Export entire mailbox** with date/subject/sender filters
 - **Export calendar items** to iCalendar (.ics) format
 - **Search and filter** messages by subject, from, to, read status, attachments
 - **Mailbox owner detection** from Mailbox table (properly decompressed)
 - **Multi-encoding support** (UTF-8, Cyrillic Windows-1251, KOI8-R, etc.)
-- Support for hidden/system items toggle
+- **Hidden/system items toggle** in filter bar
 
 ## Screenshots
 
@@ -90,7 +93,7 @@ python gui_viewer_v2.py [path_to_edb_file]
 py -3.12 gui_viewer_v2.py [path_to_edb_file]
 ```
 
-Or launch without arguments and use the Browse button to select an EDB file.
+Or launch without arguments and use the Browse button (or click the DB field) to select an EDB file.
 
 ### Command Line Mode
 
@@ -164,57 +167,22 @@ python cli.py database.edb export-calendar -m 103 -o calendar.ics
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         GUI Layer (PyQt6)                           │
 ├─────────────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐  ┌──────────────┐  ┌────────────────────────────┐ │
-│  │ File Select  │  │   Mailbox    │  │      Owner Label           │ │
-│  │   Toolbar    │  │   Dropdown   │  │   (from Mailbox table)     │ │
-│  └──────────────┘  └──────────────┘  └────────────────────────────┘ │
-├─────────────────────────────────────────────────────────────────────┤
-│  ┌───────────┐  ┌──────────────────────┐  ┌───────────────────────┐ │
-│  │  Folder   │  │    Message List      │  │   Content Viewer      │ │
-│  │   Tree    │  │  ┌────────────────┐  │  │  ┌─────────────────┐  │ │
-│  │           │  │  │ Search/Filter  │  │  │  │ Body (Text)     │  │ │
-│  │ - Inbox   │  │  └────────────────┘  │  │  │ Body (HTML)     │  │ │
-│  │ - Sent    │  │  # Date From To Subj │  │  │ HTML Source     │  │ │
-│  │ - Drafts  │  │  1 2026 Admin...     │  │  │ Raw Body        │  │ │
-│  │ - Deleted │  │  2 2026 User...      │  │  │ Parsed Data     │  │ │
-│  │ - ...     │  │                      │  │  │ Attachments     │  │ │
-│  └───────────┘  └──────────────────────┘  │  │ All Columns     │  │ │
-│                                           │  └─────────────────┘  │ │
-│                                           └───────────────────────┘ │
-├─────────────────────────────────────────────────────────────────────┤
-│  Export: [EML] [Attachments] [Folder] [Calendar (.ics)]             │
-├─────────────────────────────────────────────────────────────────────┤
+│  Row 1: [DB: filename] [...] [Load] [stats label]      [About]     │
+│  Row 2: [MB: -- Select Mailbox --]  [Owner]                        │
+├─────────────┬───────────────────────┬───────────────────────────────┤
+│  Left Panel │    Middle Panel       │      Right Panel              │
+│             │                       │                               │
+│ [Exp Folder]│ Search: [___] Status  │ [Exp EML] [Cal] [Attach]     │
+│ [Exp Mbox]  │ [All] Has Attach      │                               │
+│             │ Hidden Clear          │ From:    (value)              │
+│ Folder Tree │                       │ To:      (value)              │
+│ - Inbox     │ # Date From To Subj   │ Subject: (value)              │
+│ - Sent      │ 1 2026 Admin...       │ Date:    (value)              │
+│ - Drafts    │ 2 2026 User...        │                               │
+│ - Deleted   │                       │ [Body Text][HTML][Attach]...  │
+│ - ...       │                       │                               │
+├─────────────┴───────────────────────┴───────────────────────────────┤
 │                          Status Bar                                 │
-└─────────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────────┐
-│                      Core Data Layer                                │
-├─────────────────────────────────────────────────────────────────────┤
-│  ┌──────────────────┐    ┌──────────────────┐                       │
-│  │   LoadWorker     │    │   Data Models    │                       │
-│  │   (QThread)      │    │                  │                       │
-│  │                  │    │  - EmailMessage  │                       │
-│  │  - Open EDB      │    │  - CalendarEvent │                       │
-│  │  - Scan tables   │    │  - Attachment    │                       │
-│  │  - Detect MBs    │    │                  │                       │
-│  │  - Get owner     │    │                  │                       │
-│  └──────────────────┘    └──────────────────┘                       │
-├─────────────────────────────────────────────────────────────────────┤
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │                    pyesedb Library                            │   │
-│  │                                                               │   │
-│  │  - ESE database parsing                                       │   │
-│  │  - Table/Column/Record access                                 │   │
-│  │  - Long Value (LV) retrieval via get_value_data_as_long_value │   │
-│  └──────────────────────────────────────────────────────────────┘   │
-├─────────────────────────────────────────────────────────────────────┤
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │                  dissect.esedb Library                        │   │
-│  │                                                               │   │
-│  │  - ESE column decompression (7-bit, LZXPRESS)                 │   │
-│  │  - Proper MS-XCA LZXPRESS for NativeBody HTML                 │   │
-│  │  - Mailbox owner name decompression                           │   │
-│  └──────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -222,12 +190,15 @@ python cli.py database.edb export-calendar -m 103 -o calendar.ics
 
 ```
 edb_exporter/
-├── gui_viewer_v2.py      # Main GUI application
+├── gui_viewer_v2.py      # Main GUI application (dark mode)
 ├── email_message.py      # Email extraction and EML export
 ├── calendar_message.py   # Calendar extraction and ICS export
 ├── lzxpress.py           # LZXPRESS decompression utilities
 ├── folder_mapping.py     # Folder name mapping
 ├── cli.py                # Command-line interface
+├── icon.png              # Application icon
+├── icon.ico              # Application icon (Windows)
+├── VERSION               # Version number
 ├── src/
 │   └── core/
 │       └── ese_reader.py # ESE database utilities
@@ -453,21 +424,6 @@ PropertyBlob Layout:
 └──────────────────────────────────────────────────────────────┘
 ```
 
-**Subject Extraction Pattern:**
-1. Find sender ending pattern: `atorM` (from "AdministratorM") or `StoneM` (from "Rosetta StoneM")
-2. Next byte is the subject length
-3. Following bytes are the subject text
-
-```python
-# Pattern: ...AdministratorM<length><subject>...
-pos = blob.find(b'atorM')
-if pos >= 0:
-    length = blob[pos + 5]  # Length byte after 'atorM'
-    subject = blob[pos + 6 : pos + 6 + length].decode('utf-8')
-```
-
-**Important:** Only extract subject when the proper pattern is found. Don't use fallback searches that might pick up system data (folder names, LDAP paths).
-
 ## Long Value (LV) Storage
 
 Large binary data (>255 bytes) is stored in ESE's Long Value B+ tree:
@@ -489,26 +445,6 @@ Access via pyesedb:
   record.is_long_value(column_idx)  → True/False
   lv = record.get_value_data_as_long_value(column_idx)
   data = lv.get_data()  → bytes
-```
-
-## SubobjectsBlob Format
-
-Links messages to their attachments:
-
-```
-Format 1 (0x21 markers):
-┌──────────┬──────────┬──────────┬──────────┐
-│  Header  │  0x21    │  Inid    │  0x21    │ ...
-│  bytes   │ (marker) │ (1 byte) │ (marker) │
-└──────────┴──────────┴──────────┴──────────┘
-
-Format 2 (0x0F format - Exchange 2013+):
-┌──────────┬──────────┬──────────┬──────────┐
-│   0x0F   │  Header  │  0x84    │  Inid+20 │ ...
-│ (length) │  bytes   │ (marker) │ (encoded)│
-└──────────┴──────────┴──────────┴──────────┘
-
-Inid values link to Attachment_XXX.Inid column
 ```
 
 ---
@@ -540,13 +476,6 @@ Inid values link to Attachment_XXX.Inid column
 - `extract_event(record, col_map)` - Extract calendar event
 - `to_ics()` - Export to iCalendar format
 - `export_calendar_to_ics(events, path)` - Export multiple events
-
-**Supported Message Classes:**
-- IPM.Appointment
-- IPM.Schedule.Meeting.Request
-- IPM.Schedule.Meeting.Resp.Pos/Neg/Tent
-- IPM.Schedule.Meeting.Canceled
-- IPM.Task
 
 ## `lzxpress.py`
 
@@ -586,8 +515,6 @@ def filetime_to_datetime(filetime_bytes):
 ```
 
 ---
-
-
 
 # License
 

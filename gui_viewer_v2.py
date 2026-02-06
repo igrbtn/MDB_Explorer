@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
     QDateEdit, QDialogButtonBox, QGridLayout
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QDate
-from PyQt6.QtGui import QFont, QAction, QTextOption, QColor, QPalette
+from PyQt6.QtGui import QFont, QAction, QTextOption, QColor, QPalette, QIcon
 
 # Using QTextBrowser for lightweight HTML rendering (no WebEngine dependency)
 
@@ -742,6 +742,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"Exchange EDB Exporter v{VERSION}")
+        icon_path = Path(__file__).parent / "icon.png"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
         self.setMinimumSize(1000, 500)
         self.resize(1400, 700)  # Default size, can be resized smaller
 
