@@ -332,27 +332,9 @@ class EmailExtractor:
         return ""
 
     def _extract_sender(self, blob: bytes) -> str:
-        """Extract sender name from PropertyBlob - simplified, use mailbox owner as fallback."""
-        # Look for Administrator pattern
-        if b'Administrator' in blob:
-            return 'Administrator'
-
-        # Simple M marker search for name-like strings
-        for i in range(len(blob) - 5):
-            if blob[i] == 0x4d:  # M marker
-                length = blob[i+1]
-                if 3 <= length <= 30 and i + 2 + length <= len(blob):
-                    potential = blob[i+2:i+2+length]
-                    if all(32 <= b < 127 for b in potential):
-                        text = potential.decode('ascii', errors='ignore')
-                        # Must look like a name (has space between words)
-                        if ' ' in text and any(c.isalpha() for c in text):
-                            # Filter obvious non-names
-                            lower = text.lower()
-                            if not any(x in lower for x in ['exchange', 'labsith', 'fydib', '@', '/', '\\']):
-                                return text
-
-        # No reliable sender found - will use mailbox owner as fallback
+        """Extract sender name - returns empty, relies on mailbox owner fallback."""
+        # PropertyBlob sender extraction is unreliable
+        # Just return empty and let fallback use mailbox owner
         return ""
 
     def _extract_subject(self, blob: bytes) -> str:
