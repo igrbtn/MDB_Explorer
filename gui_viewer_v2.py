@@ -877,9 +877,7 @@ class MainWindow(QMainWindow):
         # Left panel: Folder tree
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-
-        left_layout.addWidget(QLabel("Folders:"))
+        left_layout.setContentsMargins(0, 26, 0, 0)  # Top margin to align with message list
         self.folder_tree = QTreeWidget()
         self.folder_tree.setHeaderLabels(["Folder", "Messages"])
         self.folder_tree.itemSelectionChanged.connect(self._on_folder_selected)
