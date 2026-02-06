@@ -792,6 +792,21 @@ class MainWindow(QMainWindow):
         refresh_action.triggered.connect(self._on_refresh)
         view_menu.addAction(refresh_action)
 
+        view_menu.addSeparator()
+
+        # Column visibility toggles
+        self.show_from_email_action = QAction("Show From Email Column", self)
+        self.show_from_email_action.setCheckable(True)
+        self.show_from_email_action.setChecked(False)
+        self.show_from_email_action.triggered.connect(self._toggle_from_email_column)
+        view_menu.addAction(self.show_from_email_action)
+
+        self.show_to_email_action = QAction("Show To Email Column", self)
+        self.show_to_email_action.setCheckable(True)
+        self.show_to_email_action.setChecked(False)
+        self.show_to_email_action.triggered.connect(self._toggle_to_email_column)
+        view_menu.addAction(self.show_to_email_action)
+
     def _setup_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
@@ -917,9 +932,9 @@ class MainWindow(QMainWindow):
 
         middle_layout.addLayout(search_layout)
 
-        # Message list
+        # Message list - columns: #, Date, From, To, FromEmail, ToEmail, Subject, Att, Read
         self.message_list = QTreeWidget()
-        self.message_list.setHeaderLabels(["#", "Date", "From", "To", "Subject", "Att", "Read"])
+        self.message_list.setHeaderLabels(["#", "Date", "From", "To", "From Email", "To Email", "Subject", "Att", "Read"])
         self.message_list.itemSelectionChanged.connect(self._on_message_selected)
         self.message_list.setMinimumWidth(500)
         self.message_list.setSortingEnabled(True)
@@ -928,9 +943,14 @@ class MainWindow(QMainWindow):
         self.message_list.setColumnWidth(1, 115)  # Date
         self.message_list.setColumnWidth(2, 120)  # From
         self.message_list.setColumnWidth(3, 120)  # To
-        self.message_list.setColumnWidth(4, 180)  # Subject
-        self.message_list.setColumnWidth(5, 30)   # Att
-        self.message_list.setColumnWidth(6, 35)   # Read
+        self.message_list.setColumnWidth(4, 150)  # From Email (hidden by default)
+        self.message_list.setColumnWidth(5, 150)  # To Email (hidden by default)
+        self.message_list.setColumnWidth(6, 180)  # Subject
+        self.message_list.setColumnWidth(7, 30)   # Att
+        self.message_list.setColumnWidth(8, 35)   # Read
+        # Hide email columns by default
+        self.message_list.setColumnHidden(4, True)  # From Email
+        self.message_list.setColumnHidden(5, True)  # To Email
         middle_layout.addWidget(self.message_list)
 
         # Store all messages for filtering
@@ -1517,7 +1537,7 @@ class MainWindow(QMainWindow):
             self.calendar_extractor = None
 
     def _index_messages(self):
-        """Index messages by folder."""
+        """Index messages by folder with progress indication."""
         self.messages_by_folder.clear()
 
         if not self.current_mailbox:
@@ -1530,8 +1550,19 @@ class MainWindow(QMainWindow):
             return
 
         col_map = get_column_map(msg_table)
+        total_records = msg_table.get_number_of_records()
 
-        for i in range(msg_table.get_number_of_records()):
+        # Show progress
+        self.progress.setVisible(True)
+        self.progress.setRange(0, total_records)
+        self.status.showMessage(f"Indexing {total_records} messages...")
+
+        for i in range(total_records):
+            # Update progress every 100 messages
+            if i % 100 == 0:
+                self.progress.setValue(i)
+                QApplication.processEvents()
+
             try:
                 record = msg_table.get_record(i)
                 if not record:
@@ -1542,6 +1573,9 @@ class MainWindow(QMainWindow):
                     self.messages_by_folder[folder_id].append(i)
             except:
                 pass
+
+        self.progress.setVisible(False)
+        self.status.showMessage(f"Indexed {total_records} messages into {len(self.messages_by_folder)} folders")
 
     def _on_folder_selected(self):
         """Handle folder selection - load and cache all messages with optimizations."""
@@ -1630,6 +1664,8 @@ class MainWindow(QMainWindow):
                 subject = ""
                 from_display = ""
                 to_display = ""
+                from_email = ""
+                to_email = ""
                 is_read = False
                 has_attach = False
 
@@ -1642,7 +1678,9 @@ class MainWindow(QMainWindow):
                         if email_msg:
                             subject = email_msg.subject or ""
                             from_display = email_msg.sender_name or ""
+                            from_email = email_msg.sender_email or ""
                             to_display = email_msg.to_names[0] if email_msg.to_names else from_display
+                            to_email = email_msg.to_emails[0] if email_msg.to_emails else from_email
                             is_read = email_msg.is_read
                             has_attach = email_msg.has_attachments
                     except Exception:
@@ -1659,6 +1697,10 @@ class MainWindow(QMainWindow):
                     from_display = self.mailbox_owner
                 if not to_display and hasattr(self, 'mailbox_owner') and self.mailbox_owner:
                     to_display = self.mailbox_owner
+                if not from_email and hasattr(self, 'mailbox_email') and self.mailbox_email:
+                    from_email = self.mailbox_email
+                if not to_email and hasattr(self, 'mailbox_email') and self.mailbox_email:
+                    to_email = self.mailbox_email
 
             except Exception as e:
                 has_error = True
@@ -1681,6 +1723,8 @@ class MainWindow(QMainWindow):
                 'date_obj': date_received,
                 'from': from_display,
                 'to': to_display,
+                'from_email': from_email,
+                'to_email': to_email,
                 'subject': subject,
                 'is_read': is_read,
                 'has_attach': has_attach,
@@ -1721,9 +1765,9 @@ class MainWindow(QMainWindow):
             if msg.get('is_hidden') and not show_hidden:
                 continue
 
-            # Apply search filter
+            # Apply search filter (searches names and emails)
             if search_text:
-                searchable = f"{msg['subject']} {msg['from']} {msg['to']}".lower()
+                searchable = f"{msg['subject']} {msg['from']} {msg['to']} {msg.get('from_email', '')} {msg.get('to_email', '')}".lower()
                 if search_text not in searchable:
                     continue
 
@@ -1739,34 +1783,36 @@ class MainWindow(QMainWindow):
             if attach_filter and not msg['has_attach']:
                 continue
 
-            # Create list item
+            # Create list item - columns: #, Date, From, To, FromEmail, ToEmail, Subject, Att, Read
             item = QTreeWidgetItem()
             item.setText(0, str(msg['rec_idx']))
             item.setData(0, Qt.ItemDataRole.UserRole, msg['rec_idx'])
             item.setText(1, msg['date'])
-            item.setText(2, msg['from'])  # Always show sender in From
-            item.setText(3, msg['to'])    # Always show recipient in To
-            item.setText(4, msg['subject'])
-            item.setText(5, "📎" if msg['has_attach'] else "")
-            item.setText(6, "✓" if msg['is_read'] else "")
+            item.setText(2, msg['from'])  # From name
+            item.setText(3, msg['to'])    # To name
+            item.setText(4, msg.get('from_email', ''))  # From email
+            item.setText(5, msg.get('to_email', ''))    # To email
+            item.setText(6, msg['subject'])
+            item.setText(7, "📎" if msg['has_attach'] else "")
+            item.setText(8, "✓" if msg['is_read'] else "")
 
             # Mark unread messages as bold
             if not msg['is_read']:
                 font = item.font(0)
                 font.setBold(True)
-                for col in range(7):
+                for col in range(9):
                     item.setFont(col, font)
 
             # Mark failed/error messages in red
             if msg.get('has_error'):
-                item.setText(4, f"[ERROR] {msg['subject']}")
-                for col in range(7):
+                item.setText(6, f"[ERROR] {msg['subject']}")
+                for col in range(9):
                     item.setForeground(col, QColor(200, 0, 0))
 
             # Mark hidden items visually (gray, lower priority than red)
             elif msg.get('is_hidden'):
-                item.setText(4, f"[HIDDEN] {msg['subject']}")
-                for col in range(7):
+                item.setText(6, f"[HIDDEN] {msg['subject']}")
+                for col in range(9):
                     item.setForeground(col, Qt.GlobalColor.gray)
 
             self.message_list.addTopLevelItem(item)
@@ -2242,8 +2288,22 @@ a {{ color: #0066cc; }}
 
     def _on_refresh(self):
         if self.current_mailbox:
+            # Clear folder cache to force reload
+            self.folder_messages_cache.clear()
             self._load_folders()
             self._index_messages()
+
+    def _toggle_from_email_column(self):
+        """Toggle From Email column visibility."""
+        hidden = self.message_list.isColumnHidden(4)
+        self.message_list.setColumnHidden(4, not hidden)
+        self.show_from_email_action.setChecked(hidden)
+
+    def _toggle_to_email_column(self):
+        """Toggle To Email column visibility."""
+        hidden = self.message_list.isColumnHidden(5)
+        self.message_list.setColumnHidden(5, not hidden)
+        self.show_to_email_action.setChecked(hidden)
 
     def _on_export(self):
         if not self.current_mailbox:
