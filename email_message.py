@@ -603,9 +603,14 @@ class EmailExtractor:
 
         # Extract from PropertyBlob
         if prop_blob:
-            msg.sender_name = self._extract_sender(prop_blob)
             msg.subject = self._extract_subject(prop_blob)
+            msg.sender_name = self._extract_sender(prop_blob)
             msg.message_id = self._extract_message_id(prop_blob)
+
+        # Validate sender - if it matches subject, it's wrong
+        if msg.sender_name and msg.subject:
+            if msg.sender_name.lower() == msg.subject.lower():
+                msg.sender_name = ""  # Clear invalid sender
 
         # Fallback sender to mailbox owner
         if not msg.sender_name and self.mailbox_owner:
@@ -619,6 +624,12 @@ class EmailExtractor:
 
         # Recipients from DisplayTo
         display_to = self._get_string(record, col_map.get('DisplayTo', -1))
+
+        # Validate DisplayTo - if it matches subject, it's wrong
+        if display_to and msg.subject:
+            if display_to.lower() == msg.subject.lower():
+                display_to = ""  # Clear invalid recipient
+
         if display_to:
             msg.to_names = [display_to]
             msg.to_emails = [f"{display_to.lower().replace(' ', '')}@lab.sith.uz"]
