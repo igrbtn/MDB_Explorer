@@ -812,64 +812,70 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
 
-        # File and mailbox selection (minimal compact row)
-        top_widget = QWidget()
-        top_widget.setFixedHeight(28)
-        top_layout = QHBoxLayout(top_widget)
-        top_layout.setContentsMargins(2, 0, 2, 0)
-        top_layout.setSpacing(3)
+        # File selection row
+        db_row = QHBoxLayout()
+        db_row.setContentsMargins(2, 2, 2, 0)
+        db_row.setSpacing(3)
 
         lbl_db = QLabel("DB:")
-        lbl_db.setFixedWidth(20)
-        top_layout.addWidget(lbl_db)
+        lbl_db.setFixedWidth(22)
+        db_row.addWidget(lbl_db)
 
         self.file_path = QLineEdit()
         self.file_path.setReadOnly(True)
         self.file_path.setPlaceholderText("Select EDB...")
         self.file_path.setMaximumWidth(200)
         self.file_path.setFixedHeight(22)
-        top_layout.addWidget(self.file_path)
+        db_row.addWidget(self.file_path)
 
         browse_btn = QPushButton("...")
         browse_btn.setFixedSize(24, 22)
         browse_btn.clicked.connect(self._on_browse)
-        top_layout.addWidget(browse_btn)
+        db_row.addWidget(browse_btn)
 
         self.load_btn = QPushButton("Load")
         self.load_btn.setFixedSize(40, 22)
         self.load_btn.clicked.connect(self._on_load)
         self.load_btn.setEnabled(False)
-        top_layout.addWidget(self.load_btn)
+        db_row.addWidget(self.load_btn)
+
+        db_row.addStretch()
+
+        self.show_hidden_cb = QCheckBox("Hidden")
+        self.show_hidden_cb.setToolTip("Show hidden/system items")
+        self.show_hidden_cb.stateChanged.connect(self._on_show_hidden_changed)
+        db_row.addWidget(self.show_hidden_cb)
+
+        self.about_btn = QPushButton("About")
+        self.about_btn.setFixedSize(50, 22)
+        self.about_btn.clicked.connect(self._on_about)
+        self.about_btn.setToolTip("About this application")
+        db_row.addWidget(self.about_btn)
+
+        layout.addLayout(db_row)
+
+        # Mailbox selection row
+        mb_row = QHBoxLayout()
+        mb_row.setContentsMargins(2, 0, 2, 2)
+        mb_row.setSpacing(3)
 
         lbl_mb = QLabel("MB:")
         lbl_mb.setFixedWidth(22)
-        top_layout.addWidget(lbl_mb)
+        mb_row.addWidget(lbl_mb)
 
         self.mailbox_combo = QComboBox()
         self.mailbox_combo.setMinimumWidth(140)
         self.mailbox_combo.setFixedHeight(22)
         self.mailbox_combo.currentIndexChanged.connect(self._on_mailbox_changed)
-        top_layout.addWidget(self.mailbox_combo)
+        mb_row.addWidget(self.mailbox_combo)
 
         self.owner_label = QLabel("")
         self.owner_label.setStyleSheet("color: #0066cc; font-weight: bold; font-size: 11px;")
-        top_layout.addWidget(self.owner_label)
+        mb_row.addWidget(self.owner_label)
 
-        top_layout.addStretch()
+        mb_row.addStretch()
 
-        self.show_hidden_cb = QCheckBox("Hidden")
-        self.show_hidden_cb.setToolTip("Show hidden/system items")
-        self.show_hidden_cb.stateChanged.connect(self._on_show_hidden_changed)
-        top_layout.addWidget(self.show_hidden_cb)
-
-        # About button in top right corner
-        self.about_btn = QPushButton("About")
-        self.about_btn.setFixedSize(50, 22)
-        self.about_btn.clicked.connect(self._on_about)
-        self.about_btn.setToolTip("About this application")
-        top_layout.addWidget(self.about_btn)
-
-        layout.addWidget(top_widget)
+        layout.addLayout(mb_row)
 
         # Main content splitter
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
