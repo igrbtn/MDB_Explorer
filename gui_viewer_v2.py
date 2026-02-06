@@ -323,6 +323,23 @@ def is_valid_sender_name(name):
     return True
 
 
+def _is_valid_name(name):
+    """Check if extracted name looks valid (not hex/garbage)."""
+    if not name or len(name) < 2:
+        return False
+    # Filter out hex-like strings (e.g., "1aa15ee3d8bb699")
+    if len(name) > 8 and all(c in '0123456789abcdefABCDEF' for c in name.replace(' ', '')):
+        return False
+    # Must have at least one letter
+    if not any(c.isalpha() for c in name):
+        return False
+    # Filter out strings that are mostly digits
+    digit_count = sum(1 for c in name if c.isdigit())
+    if digit_count > len(name) * 0.5:
+        return False
+    return True
+
+
 def extract_sender_from_blob(blob):
     """Extract sender name from PropertyBlob using ESE reader or fallback."""
     if not blob:
@@ -332,10 +349,34 @@ def extract_sender_from_blob(blob):
     if HAS_ESE_READER:
         try:
             sender = ese_extract_sender(blob)
-            if sender:
+            if sender and _is_valid_name(sender):
                 return sender
         except:
             pass
+
+    # Look for common name patterns in the blob
+    # Pattern: Look for "Rosetta Stone" marker followed by sender name
+    try:
+        # Search for name-like strings (capitalized words)
+        text = blob.decode('utf-8', errors='ignore')
+
+        # Look for email-like pattern and extract name part
+        import re
+        # Match "Name <email>" or just name patterns
+        email_match = re.search(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*<?[\w\.-]+@', text)
+        if email_match:
+            name = email_match.group(1)
+            if _is_valid_name(name):
+                return name
+
+        # Look for standalone capitalized names (First Last pattern)
+        name_match = re.search(r'\b([A-Z][a-z]{2,15})\s+([A-Z][a-z]{2,15})\b', text)
+        if name_match:
+            name = f"{name_match.group(1)} {name_match.group(2)}"
+            if _is_valid_name(name):
+                return name
+    except:
+        pass
 
     # Fallback: Look for Admin...istrator pattern
     if b'Admin' in blob:
@@ -343,6 +384,7 @@ def extract_sender_from_blob(blob):
         chunk = blob[idx:idx + 30]
         if b'istrator' in chunk:
             return 'Administrator'
+
     return None
 
 
@@ -1583,13 +1625,15 @@ class MainWindow(QMainWindow):
                 if prop_blob:
                     try:
                         subject = extract_subject_from_blob(prop_blob) or ""
-                        from_display = extract_sender_from_blob(prop_blob) or ""
-                        # Use sender as recipient fallback for list display
+                        sender = extract_sender_from_blob(prop_blob)
+                        # Validate sender - filter out hex-like strings
+                        if sender and _is_valid_name(sender):
+                            from_display = sender
                         to_display = from_display
                     except Exception:
                         has_error = True
 
-                # Fallback for empty fields
+                # Fallback for empty fields - use mailbox owner
                 if not from_display and hasattr(self, 'mailbox_owner') and self.mailbox_owner:
                     from_display = self.mailbox_owner
                 if not to_display and hasattr(self, 'mailbox_owner') and self.mailbox_owner:
