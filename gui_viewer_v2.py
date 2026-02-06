@@ -1716,13 +1716,13 @@ class MainWindow(QMainWindow):
             if has_error:
                 failed_count += 1
 
-            # Cache message data
+            # Cache message data - use emails as primary display
             msg_data = {
                 'rec_idx': rec_idx,
                 'date': date_str,
                 'date_obj': date_received,
-                'from': from_display,
-                'to': to_display,
+                'from': from_email or from_display,  # Show email, fallback to name
+                'to': to_email or to_display,        # Show email, fallback to name
                 'from_email': from_email,
                 'to_email': to_email,
                 'subject': subject,
