@@ -1626,29 +1626,33 @@ class MainWindow(QMainWindow):
                 date_received = get_filetime_value(record, col_map.get('DateReceived', -1))
                 date_str = date_received.strftime("%Y-%m-%d %H:%M") if date_received else ""
 
-                # Get flags (fast - just byte check)
-                is_read_raw = get_bytes_value(record, col_map.get('IsRead', -1))
-                is_read = bool(is_read_raw and is_read_raw != b'\x00')
-
-                has_attach_raw = get_bytes_value(record, col_map.get('HasAttachments', -1))
-                has_attach = bool(has_attach_raw and has_attach_raw != b'\x00')
-
-                # Extract basic fields from PropertyBlob (lightweight - no body decode)
-                prop_blob = get_bytes_value(record, col_map.get('PropertyBlob', -1))
+                # Use EmailExtractor with headers_only=True for fast, accurate extraction
                 subject = ""
                 from_display = ""
                 to_display = ""
+                is_read = False
+                has_attach = False
 
-                if prop_blob:
+                if HAS_EMAIL_MODULE and self.email_extractor:
                     try:
-                        subject = extract_subject_from_blob(prop_blob) or ""
-                        sender = extract_sender_from_blob(prop_blob)
-                        # Validate sender - filter out hex-like strings
-                        if sender and _is_valid_name(sender):
-                            from_display = sender
-                        to_display = from_display
+                        email_msg = self.email_extractor.extract_message(
+                            record, col_map, rec_idx,
+                            headers_only=True  # Skip body/attachments for speed
+                        )
+                        if email_msg:
+                            subject = email_msg.subject or ""
+                            from_display = email_msg.sender_name or ""
+                            to_display = email_msg.to_names[0] if email_msg.to_names else from_display
+                            is_read = email_msg.is_read
+                            has_attach = email_msg.has_attachments
                     except Exception:
                         has_error = True
+                else:
+                    # Fallback: basic extraction
+                    is_read_raw = get_bytes_value(record, col_map.get('IsRead', -1))
+                    is_read = bool(is_read_raw and is_read_raw != b'\x00')
+                    has_attach_raw = get_bytes_value(record, col_map.get('HasAttachments', -1))
+                    has_attach = bool(has_attach_raw and has_attach_raw != b'\x00')
 
                 # Fallback for empty fields - use mailbox owner
                 if not from_display and hasattr(self, 'mailbox_owner') and self.mailbox_owner:

@@ -544,7 +544,7 @@ class EmailExtractor:
 
     def extract_message(self, record, col_map: dict, rec_idx: int,
                        folder_name: str = "", tables: dict = None,
-                       mailbox_num: int = 0) -> EmailMessage:
+                       mailbox_num: int = 0, headers_only: bool = False) -> EmailMessage:
         """
         Extract a complete EmailMessage from a database record.
 
@@ -555,6 +555,7 @@ class EmailExtractor:
             folder_name: Name of the folder
             tables: Dictionary of all tables (for attachments)
             mailbox_num: Mailbox number (for attachments)
+            headers_only: If True, skip body and attachment extraction (fast mode for list views)
 
         Returns:
             EmailMessage object
@@ -611,18 +612,20 @@ class EmailExtractor:
             msg.to_names = [msg.sender_name]
             msg.to_emails = [msg.sender_email]
 
-        # Body from NativeBody
-        native_body = self._get_long_value(record, col_map.get('NativeBody', -1))
-        if native_body:
-            msg.body_html, msg.body_text = self._extract_body(native_body, prop_blob)
+        # Skip body and attachment extraction in headers_only mode (fast mode for list views)
+        if not headers_only:
+            # Body from NativeBody
+            native_body = self._get_long_value(record, col_map.get('NativeBody', -1))
+            if native_body:
+                msg.body_html, msg.body_text = self._extract_body(native_body, prop_blob)
 
-        # If no body found, try PropertyBlob
-        if not msg.body_text and prop_blob:
-            msg.body_text = self._extract_body_from_property_blob(prop_blob)
+            # If no body found, try PropertyBlob
+            if not msg.body_text and prop_blob:
+                msg.body_text = self._extract_body_from_property_blob(prop_blob)
 
-        # Load attachments if tables provided
-        if msg.has_attachments and tables and mailbox_num:
-            msg.attachments = self._extract_attachments(record, col_map, tables, mailbox_num)
+            # Load attachments if tables provided
+            if msg.has_attachments and tables and mailbox_num:
+                msg.attachments = self._extract_attachments(record, col_map, tables, mailbox_num)
 
         return msg
 
