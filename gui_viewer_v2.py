@@ -866,6 +866,10 @@ class MainWindow(QMainWindow):
         self.email_extractor = None  # EmailExtractor instance
         self.calendar_extractor = None  # CalendarExtractor instance
         self.folder_messages_cache = {}  # Cache: folder_id -> list of message data
+        self._cached_msg_col_map = None
+        self._cached_msg_columns = None
+        self._cached_attach_col_map = None
+        self._cached_inid_to_record = None
         self.debug_mode = False
         self.profiler_dialog = None
 
@@ -1405,16 +1409,62 @@ class MainWindow(QMainWindow):
             return
         self.status.showMessage(f"Selected mailbox {self.current_mailbox}, loading...")
 
-        # Clear folder cache when changing mailbox
+        # Clear caches when changing mailbox
         self.folder_messages_cache.clear()
+        self._cached_msg_col_map = None
+        self._cached_msg_columns = None
+        self._cached_attach_col_map = None
+        self._cached_inid_to_record = None
 
         try:
             self._load_folders()
             self._index_messages()
+            self._build_mailbox_caches()
             self.export_mailbox_btn.setEnabled(True)
         except Exception as e:
             self.status.showMessage(f"Error loading mailbox: {e}")
             QMessageBox.warning(self, "Error", f"Failed to load mailbox:\n{e}")
+
+    def _build_mailbox_caches(self):
+        """Pre-build column maps and attachment index for current mailbox."""
+        profiler.start("Build Caches")
+
+        # Cache Message table column map
+        msg_table_name = f"Message_{self.current_mailbox}"
+        msg_table = self.tables.get(msg_table_name)
+        if msg_table:
+            col_map = {}
+            columns = []
+            for i in range(msg_table.get_number_of_columns()):
+                col = msg_table.get_column(i)
+                if col:
+                    col_map[col.name] = i
+                    columns.append((i, col.name, col.type))
+            self._cached_msg_col_map = col_map
+            self._cached_msg_columns = columns
+
+        # Cache Attachment table column map and Inid-to-record index
+        attach_table_name = f"Attachment_{self.current_mailbox}"
+        attach_table = self.tables.get(attach_table_name)
+        if attach_table:
+            attach_col_map = get_column_map(attach_table)
+            self._cached_attach_col_map = attach_col_map
+
+            inid_to_record = {}
+            for i in range(attach_table.get_number_of_records()):
+                try:
+                    att_record = attach_table.get_record(i)
+                    if not att_record:
+                        continue
+                    inid = get_bytes_value(att_record, attach_col_map.get('Inid', -1))
+                    if inid and len(inid) >= 4:
+                        inid_val = struct.unpack('<I', inid[:4])[0]
+                        inid_to_record[inid_val] = i
+                except:
+                    pass
+            self._cached_inid_to_record = inid_to_record
+
+        profiler.stop("Build Caches")
 
     def _load_folders(self):
         """Load folders by scanning messages and using Folder table metadata."""
@@ -2099,13 +2149,18 @@ class MainWindow(QMainWindow):
         # Enable export button
         self.export_eml_btn2.setEnabled(True)
 
-        col_map = {}
-        columns = []
-        for i in range(msg_table.get_number_of_columns()):
-            col = msg_table.get_column(i)
-            if col:
-                col_map[col.name] = i
-                columns.append((i, col.name, col.type))
+        # Use cached column map (built once per mailbox)
+        if self._cached_msg_col_map:
+            col_map = self._cached_msg_col_map
+            columns = self._cached_msg_columns
+        else:
+            col_map = {}
+            columns = []
+            for i in range(msg_table.get_number_of_columns()):
+                col = msg_table.get_column(i)
+                if col:
+                    col_map[col.name] = i
+                    columns.append((i, col.name, col.type))
 
         # Get PropertyBlob
         prop_blob = get_bytes_value(record, col_map.get('PropertyBlob', -1))
@@ -2724,21 +2779,9 @@ a {{ color: #0066cc; }}
             self.content_tabs.setTabText(2, "Attachments (0)")
             return
 
-        attach_col_map = get_column_map(attach_table)
-
-        # Build Inid to record index map
-        inid_to_record = {}
-        for i in range(attach_table.get_number_of_records()):
-            try:
-                att_record = attach_table.get_record(i)
-                if not att_record:
-                    continue
-                inid = get_bytes_value(att_record, attach_col_map.get('Inid', -1))
-                if inid and len(inid) >= 4:
-                    inid_val = struct.unpack('<I', inid[:4])[0]
-                    inid_to_record[inid_val] = i
-            except:
-                pass
+        # Use cached maps (built once per mailbox)
+        attach_col_map = self._cached_attach_col_map if self._cached_attach_col_map else get_column_map(attach_table)
+        inid_to_record = self._cached_inid_to_record if self._cached_inid_to_record else {}
 
         # Load linked attachments only (no fallback to avoid duplicates)
         records_to_load = []
