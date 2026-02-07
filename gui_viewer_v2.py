@@ -2543,13 +2543,9 @@ a {{ color: #0066cc; }}
             else:
                 self.columns_table.setItem(row, 2, QTableWidgetItem("(empty)"))
 
-        # Store email data for export - use EmailMessage if available
-        # Convert attachments to 3-tuple format for EML export (skip external references)
-        eml_attachments = []
-        for att in self.current_attachments:
-            is_external = att[3] if len(att) > 3 else False
-            if not is_external:
-                eml_attachments.append((att[0], att[1], att[2]))
+        # Attachments loaded lazily - build list on demand during export
+        # Attachment format: (filename, content_type, size, is_external, record_idx)
+        eml_attachments = []  # Populated lazily during EML export
 
         if email_msg:
             # Use data from EmailMessage object
@@ -2869,22 +2865,24 @@ a {{ color: #0066cc; }}
                     continue
 
                 is_external = False
-                actual_content = content
+                content_size = len(content)
 
-                # Check if this is a Long Value reference (4 bytes)
+                # Check if this is a Long Value reference (4 bytes) - get size without reading data
                 if len(content) == 4:
                     content_idx = attach_col_map.get('Content', -1)
                     if content_idx >= 0:
                         try:
-                            # Try to get Long Value data
                             if att_record.is_long_value(content_idx):
                                 lv = att_record.get_value_data_as_long_value(content_idx)
-                                if lv and hasattr(lv, 'get_data'):
-                                    lv_data = lv.get_data()
-                                    if lv_data and len(lv_data) > 0:
-                                        actual_content = lv_data
+                                if lv:
+                                    # Get size without reading full data
+                                    if hasattr(lv, 'get_size'):
+                                        content_size = lv.get_size()
                                     else:
-                                        is_external = True
+                                        content_size = 0  # Size unknown, will load on demand
+                                    if content_size == 0:
+                                        # Check if truly empty or just unknown size
+                                        content_size = -1  # Placeholder for "has data"
                                 else:
                                     is_external = True
                             else:
@@ -2893,28 +2891,24 @@ a {{ color: #0066cc; }}
                             is_external = True
                     else:
                         is_external = True
-                # Decode UTF-16LE BOM content if needed
-                elif content.startswith(b'\xff\xfe'):
-                    try:
-                        text = content.decode('utf-16-le')
-                        actual_content = text.encode('utf-8')
-                    except:
-                        pass
 
                 if is_external:
                     display_name = f"{filename} (external reference - {content.hex()})"
+                elif content_size > 0:
+                    display_name = f"{filename} ({content_size} bytes)"
                 else:
-                    display_name = f"{filename} ({len(actual_content)} bytes)"
+                    display_name = f"{filename} (stored)"
 
                 # Deduplicate by filename and size
                 is_duplicate = False
                 for existing in self.current_attachments:
-                    if existing[0] == filename and len(existing[2]) == len(actual_content):
+                    if existing[0] == filename and existing[2] == content_size:
                         is_duplicate = True
                         break
 
                 if not is_duplicate:
-                    self.current_attachments.append((filename, content_type, actual_content, is_external))
+                    # Store metadata only - data loaded on demand via _get_attachment_data()
+                    self.current_attachments.append((filename, content_type, content_size, is_external, i))
 
                     item = QListWidgetItem(display_name)
                     item.setData(Qt.ItemDataRole.UserRole, len(self.current_attachments) - 1)
@@ -2931,6 +2925,57 @@ a {{ color: #0066cc; }}
             self.save_attach_btn.setEnabled(True)
             self.save_all_attach_btn.setEnabled(True)
         profiler.stop("Load Attachments")
+
+    def _get_attachment_data(self, att_record_idx):
+        """Load attachment binary data on demand from the attachment table."""
+        attach_table_name = f"Attachment_{self.current_mailbox}"
+        attach_table = self.tables.get(attach_table_name)
+        if not attach_table:
+            return None
+
+        attach_col_map = self._cached_attach_col_map if self._cached_attach_col_map else get_column_map(attach_table)
+
+        try:
+            att_record = attach_table.get_record(att_record_idx)
+            if not att_record:
+                return None
+
+            content = get_bytes_value(att_record, attach_col_map.get('Content', -1))
+            if not content:
+                return None
+
+            # Long Value reference
+            if len(content) == 4:
+                content_idx = attach_col_map.get('Content', -1)
+                if content_idx >= 0 and att_record.is_long_value(content_idx):
+                    lv = att_record.get_value_data_as_long_value(content_idx)
+                    if lv and hasattr(lv, 'get_data'):
+                        lv_data = lv.get_data()
+                        if lv_data and len(lv_data) > 0:
+                            return lv_data
+                return None
+
+            # UTF-16LE BOM content
+            if content.startswith(b'\xff\xfe'):
+                try:
+                    return content.decode('utf-16-le').encode('utf-8')
+                except:
+                    pass
+
+            return content
+        except:
+            return None
+
+    def _build_eml_attachments(self):
+        """Build attachment data list for EML export (loads data on demand)."""
+        eml_attachments = []
+        for att in self.current_attachments:
+            is_external = att[3] if len(att) > 3 else False
+            if not is_external:
+                data = self._get_attachment_data(att[4])
+                if data:
+                    eml_attachments.append((att[0], att[1], data))
+        return eml_attachments
 
     def _on_export_eml(self):
         """Export current message as EML file using stable EmailMessage class."""
@@ -2960,7 +3005,10 @@ a {{ color: #0066cc; }}
             profiler.stop("Export EML")
             return
 
-        # Fallback to old method
+        # Fallback to old method - load attachment data lazily
+        if self.current_email_data and not self.current_email_data.get('attachments'):
+            self.current_email_data['attachments'] = self._build_eml_attachments()
+
         if not self.current_email_data:
             QMessageBox.warning(self, "Export", "No message selected")
             profiler.stop("Export EML")
@@ -3003,8 +3051,6 @@ a {{ color: #0066cc; }}
         skipped = 0
         for att in self.current_attachments:
             filename = att[0]
-            content_type = att[1]
-            data = att[2]
             is_external = att[3] if len(att) > 3 else False
 
             if is_external:
@@ -3012,6 +3058,11 @@ a {{ color: #0066cc; }}
                 continue
 
             try:
+                data = self._get_attachment_data(att[4])
+                if not data:
+                    skipped += 1
+                    continue
+
                 out_path = Path(output_dir) / filename
                 # Handle duplicate filenames
                 counter = 1
@@ -3459,7 +3510,6 @@ a {{ color: #0066cc; }}
 
         att = self.current_attachments[idx]
         filename = att[0]
-        data = att[2]
         is_external = att[3] if len(att) > 3 else False
 
         if is_external:
@@ -3475,6 +3525,10 @@ a {{ color: #0066cc; }}
             return
 
         try:
+            data = self._get_attachment_data(att[4])
+            if not data:
+                QMessageBox.warning(self, "Save", "Could not read attachment data")
+                return
             with open(path, 'wb') as f:
                 f.write(data)
             self.status.showMessage(f"Saved attachment to {path}")
@@ -3493,7 +3547,6 @@ a {{ color: #0066cc; }}
 
         att = self.current_attachments[idx]
         filename = att[0]
-        data = att[2]
         is_external = att[3] if len(att) > 3 else False
 
         if is_external:
@@ -3507,6 +3560,10 @@ a {{ color: #0066cc; }}
 
         if path:
             try:
+                data = self._get_attachment_data(att[4])
+                if not data:
+                    QMessageBox.warning(self, "Save", "Could not read attachment data")
+                    return
                 with open(path, 'wb') as f:
                     f.write(data)
                 self.status.showMessage(f"Saved {filename} to {path}")
