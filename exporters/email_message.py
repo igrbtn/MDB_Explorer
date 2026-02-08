@@ -599,9 +599,10 @@ class EmailExtractor:
                     if text:
                         return text
 
-        # Fallback: scan ALL M/K markers (0x4d/0x4b) for first printable text
+        # Fallback: scan M/K markers, collect candidates (sender=1st, subject=2nd)
         skip_words = ['admin', 'exchange', 'recipient', 'labsith', 'fydib',
-                      'pdlt', 'group', 'index', 'system']
+                      'pdlt', 'group', 'index', 'system', 'mailbox']
+        candidates = []
         for i in range(len(blob) - 5):
             if blob[i] not in (0x4d, 0x4b):  # M or K marker
                 continue
@@ -611,23 +612,25 @@ class EmailExtractor:
             if i + 2 + length > len(blob):
                 continue
             potential = blob[i + 2:i + 2 + length]
-            # All bytes must be printable (including extended ASCII/Cyrillic)
-            if not all((32 <= b < 127) or (128 <= b <= 255) for b in potential):
+            # All bytes must be printable ASCII
+            if not all(32 <= b < 127 for b in potential):
                 continue
-            # Try to decode
-            text = None
-            for enc in ['utf-8', 'windows-1251', 'latin-1']:
-                try:
-                    text = potential.decode(enc)
-                    break
-                except:
-                    pass
-            if not text:
+            text = potential.decode('ascii', errors='ignore')
+            if len(text) < 2:
+                continue
+            # Skip Message-IDs
+            if text.startswith('<'):
                 continue
             # Skip system strings
             if any(w in text.lower() for w in skip_words):
                 continue
-            return text
+            candidates.append(text)
+
+        # Subject is typically the second candidate (after sender name)
+        if len(candidates) >= 2:
+            return candidates[1]
+        elif len(candidates) == 1:
+            return candidates[0]
 
         return ""
 
