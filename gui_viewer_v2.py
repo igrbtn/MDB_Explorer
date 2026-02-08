@@ -3532,10 +3532,8 @@ a {{ color: #0066cc; }}
                           and self.calendar_extractor.is_calendar_item(msg_class))
                 is_vcf = msg_class.upper().startswith('IPM.CONTACT') if msg_class else False
 
-                subject = extract_subject_from_blob(prop_blob) if prop_blob else ""
                 date_sent = get_filetime_value(record, col_map.get('DateSent', -1))
                 date_str = date_sent.strftime("%Y%m%d_%H%M%S") if date_sent else "nodate"
-                subject_safe = re.sub(r'[<>:"/\\|?*]', '_', subject or 'no_subject')[:50]
 
                 # Extract full EmailMessage for EML/VCF export
                 email_msg = None
@@ -3544,10 +3542,19 @@ a {{ color: #0066cc; }}
                         record, col_map, rec_idx, folder_name=folder_name,
                         tables=self.tables, mailbox_num=self.current_mailbox)
 
+                # Get subject from EmailMessage if available, fallback to blob extraction
+                subject = ''
+                if email_msg and email_msg.subject:
+                    subject = email_msg.subject
+                elif prop_blob:
+                    subject = extract_subject_from_blob(prop_blob)
+                subject_safe = re.sub(r'[<>:"/\\|?*]', '_', subject or 'no_subject')[:50]
+
                 if is_cal:
                     # Export as ICS
                     cal_event = self.calendar_extractor.extract_event(record, col_map, rec_idx)
                     if cal_event:
+                        subject_safe = re.sub(r'[<>:"/\\|?*]', '_', cal_event.subject or 'event')[:50]
                         filename = f"{date_str}_{rec_idx}_{subject_safe}.ics"
                         out_path = Path(output_dir) / filename
                         with open(out_path, 'w', encoding='utf-8') as f:
