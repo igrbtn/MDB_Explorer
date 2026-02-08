@@ -832,11 +832,10 @@ class EmailExtractor:
         if msg_class:
             msg.message_class = msg_class
 
-        # Extract fields from PropertyBlob (sender first, then subject uses sender to locate)
+        # Extract sender/email from PropertyBlob first
         if prop_blob:
             msg.sender_name = self._extract_sender(prop_blob)
             msg.sender_email = self._extract_sender_email(prop_blob)
-            msg.subject = self._extract_subject(prop_blob, msg.sender_name)
             msg.message_id = self._extract_message_id(prop_blob)
 
         # Extract recipient from DisplayTo column
@@ -845,29 +844,39 @@ class EmailExtractor:
             recipient_name = self._extract_recipient_from_display_to(display_to)
             if recipient_name:
                 msg.to_names = [recipient_name]
-                # Generate email from name
                 clean_name = recipient_name.lower().replace(' ', '')
                 msg.to_emails = [f"{clean_name}@unknown"]
 
-        # Get body content (skip if headers_only for performance)
+        # Get body content - extract BEFORE subject so we can use RFC822 sender
         native_body = self._get_long_value(record, col_map.get('NativeBody', -1))
         body_text = ""
         if native_body:
             msg.body_html, body_text = self._extract_body(native_body, prop_blob)
             msg.body_text = body_text
 
-        # Fallback sender to mailbox owner if not found in PropertyBlob
+        # Parse RFC822 headers from body to get real sender for this email
+        if body_text:
+            headers = self._parse_rfc822_headers(body_text)
+            if 'From' in headers:
+                name, email = self._extract_name_from_header(headers['From'])
+                if name:
+                    msg.sender_name = name
+                if email:
+                    msg.sender_email = email
+
+        # Fallback sender to mailbox owner if not found
         if not msg.sender_name and self.mailbox_owner:
             msg.sender_name = self.mailbox_owner
+
+        # Now extract subject using this email's actual sender name
+        if prop_blob:
+            msg.subject = self._extract_subject(prop_blob, msg.sender_name)
 
         # Build sender email if missing
         if msg.sender_name and not msg.sender_email:
             msg.sender_email = f"{msg.sender_name.lower().replace(' ', '')}@unknown"
         elif not msg.sender_email and self.mailbox_email:
             msg.sender_email = self.mailbox_email
-
-        # DO NOT fall back recipients to sender - leave empty if not found
-        # This prevents showing same value for From and To
 
         # If no body found yet, try PropertyBlob
         if not msg.body_text and prop_blob:
