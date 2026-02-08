@@ -800,7 +800,7 @@ class EmailExtractor:
                 msg.to_names = [recipient_name]
                 # Generate email from name
                 clean_name = recipient_name.lower().replace(' ', '')
-                msg.to_emails = [f"{clean_name}@lab.sith.uz"]
+                msg.to_emails = [f"{clean_name}@unknown"]
 
         # Get body content (skip if headers_only for performance)
         native_body = self._get_long_value(record, col_map.get('NativeBody', -1))
@@ -815,7 +815,7 @@ class EmailExtractor:
 
         # Build sender email if missing
         if msg.sender_name and not msg.sender_email:
-            msg.sender_email = f"{msg.sender_name.lower().replace(' ', '')}@lab.sith.uz"
+            msg.sender_email = f"{msg.sender_name.lower().replace(' ', '')}@unknown"
         elif not msg.sender_email and self.mailbox_email:
             msg.sender_email = self.mailbox_email
 
@@ -917,7 +917,7 @@ class EmailExtractor:
 
         # Try LZXPRESS decompression
         try:
-            from lzxpress import decompress_exchange_body, extract_text_from_html
+            from core.lzxpress import decompress_exchange_body, extract_text_from_html
             decompressed = decompress_exchange_body(native_body)
             if decompressed:
                 html_body = decompressed.decode('utf-8', errors='replace')
@@ -937,7 +937,7 @@ class EmailExtractor:
     def _extract_body_from_property_blob(self, blob: bytes) -> str:
         """Extract body text from PropertyBlob as fallback."""
         try:
-            from lzxpress import extract_body_from_property_blob
+            from core.lzxpress import extract_body_from_property_blob
             return extract_body_from_property_blob(blob)
         except:
             # Simple fallback: extract printable strings

@@ -95,11 +95,6 @@ from PyQt6.QtGui import QFont, QAction, QTextOption, QColor, QPalette, QIcon
 
 # Using QTextBrowser for lightweight HTML rendering (no WebEngine dependency)
 
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email.utils import format_datetime
-from email import encoders
 
 # Try to import LZXPRESS decompressor
 try:
@@ -115,17 +110,6 @@ try:
 except ImportError:
     HAS_DISSECT = False
 
-# Try to import ESE Reader module
-try:
-    from core.ese_reader import (
-        ESEReader, ESEColumnType,
-        extract_subject_from_property_blob as ese_extract_subject,
-        extract_sender_from_property_blob as ese_extract_sender,
-        extract_message_id_from_property_blob as ese_extract_message_id
-    )
-    HAS_ESE_READER = True
-except ImportError:
-    HAS_ESE_READER = False
 
 # Try to import folder mapping
 try:
@@ -214,17 +198,6 @@ def try_decode(data, encodings=None):
         return data.decode('latin-1', errors='replace').rstrip('\x00')
 
 
-def is_printable_extended(b):
-    """Check if byte is printable (including extended ASCII/Cyrillic)."""
-    # ASCII printable
-    if 32 <= b < 127:
-        return True
-    # Extended ASCII (Windows-1251 Cyrillic range, etc.)
-    if 128 <= b <= 255:
-        return True
-    return False
-
-
 def get_column_map(table):
     """Get mapping of column names to indices."""
     col_map = {}
@@ -269,224 +242,6 @@ def get_folder_id(record, col_idx):
     return None
 
 
-def extract_subject_from_blob(blob):
-    """Extract subject from PropertyBlob using ESE reader or fallback."""
-    if not blob or len(blob) < 10:
-        return None
-
-    # Try ESE reader module first (better extraction)
-    if HAS_ESE_READER:
-        try:
-            subject = ese_extract_subject(blob)
-            if subject:
-                return subject
-        except:
-            pass
-
-    # Fallback: Look for marker byte (M=0x4d, K=0x4b) followed by length + string
-    for i in range(len(blob) - 5):
-        if blob[i] in (0x4d, 0x4b):  # M or K marker
-            length = blob[i+1]
-            if 2 <= length <= 100 and i + 2 + length <= len(blob):
-                potential = blob[i+2:i+2+length]
-                # Check if it's printable (including extended ASCII/Cyrillic)
-                if all(is_printable_extended(b) for b in potential):
-                    # Try multiple encodings
-                    text = try_decode(potential)
-                    if text:
-                        # Filter out common non-subject strings
-                        skip_words = ['admin', 'exchange', 'recipient', 'labsith', 'fydib', 'pdlt', 'group', 'index']
-                        if not any(x in text.lower() for x in skip_words):
-                            return text
-    return None
-
-
-def extract_message_id_from_blob(blob):
-    """Extract Message-ID from PropertyBlob using ESE reader or fallback."""
-    if not blob or len(blob) < 50:
-        return None
-
-    # Try ESE reader module first
-    if HAS_ESE_READER:
-        try:
-            msg_id = ese_extract_message_id(blob)
-            if msg_id:
-                return msg_id
-        except:
-            pass
-
-    # Fallback: Pattern: < + hex chars (with nulls) + @ + domain + >
-    for i in range(len(blob) - 50):
-        if blob[i] == 0x3c:  # '<'
-            hex_chars = b'0123456789abcdef'
-            collected = []
-            j = i + 1
-
-            # Collect until '@'
-            while j < len(blob) and j < i + 60:
-                if blob[j] == 0x40:  # '@'
-                    break
-                if blob[j] in hex_chars:
-                    collected.append(blob[j])
-                elif blob[j] == 0x00:
-                    pass  # Skip nulls
-                else:
-                    break
-                j += 1
-
-            if len(collected) >= 20 and j < len(blob) and blob[j] == 0x40:
-                hex_part = bytes(collected).decode('ascii')
-                # Extract domain
-                domain_chars = []
-                k = j + 1
-                while k < len(blob) and k < j + 20:
-                    if blob[k] == 0x3e:  # '>'
-                        break
-                    if 0x20 <= blob[k] < 0x7f:
-                        domain_chars.append(blob[k])
-                    k += 1
-                if domain_chars:
-                    domain = bytes(domain_chars).decode('ascii')
-                    return f'<{hex_part}@{domain}>'
-    return None
-
-
-def is_valid_sender_name(name):
-    """Check if a string looks like a real sender name (not Message-ID)."""
-    if not name or len(name) < 2:
-        return False
-
-    # If it's an email address, check the local part
-    if '@' in name:
-        local_part = name.split('@')[0]
-        # Reject if local part is mostly hex characters (Message-ID pattern)
-        if len(local_part) >= 4:
-            hex_chars = sum(1 for c in local_part if c in '0123456789abcdef')
-            if hex_chars / len(local_part) > 0.6:
-                return False
-        # Very short local parts are suspicious
-        if len(local_part) <= 4 and local_part.replace('@', '').isalnum():
-            return False
-        # Local part should have at least one letter
-        if not any(c.isalpha() for c in local_part):
-            return False
-    else:
-        # Plain names should have at least one letter
-        if not any(c.isalpha() for c in name):
-            return False
-        # Should be at least 3 characters for a real name
-        if len(name) < 3:
-            return False
-
-    return True
-
-
-def _is_valid_name(name):
-    """Check if extracted name looks valid (not hex/garbage/email)."""
-    if not name or len(name) < 2:
-        return False
-
-    # Filter out email addresses
-    if '@' in name:
-        return False
-
-    # Filter out hex-like strings (e.g., "1aa15ee3d8bb699", "d5ed566d86865")
-    clean = name.replace(' ', '').replace('-', '').replace('_', '')
-    if len(clean) > 6 and all(c in '0123456789abcdefABCDEF' for c in clean):
-        return False
-
-    # Must have at least 2 letters
-    letter_count = sum(1 for c in name if c.isalpha())
-    if letter_count < 2:
-        return False
-
-    # Filter out strings that are mostly digits/hex
-    alnum = [c for c in name if c.isalnum()]
-    if alnum:
-        digit_hex_count = sum(1 for c in alnum if c.isdigit() or c.lower() in 'abcdef')
-        if digit_hex_count > len(alnum) * 0.4:
-            return False
-
-    # Filter out system/group names
-    lower_name = name.lower()
-    if any(x in lower_name for x in ['administrative', 'system ', 'group']):
-        return False
-
-    return True
-
-
-def extract_sender_from_blob(blob):
-    """Extract sender name from PropertyBlob using ESE reader or fallback."""
-    if not blob:
-        return None
-
-    # Try ESE reader module first (better extraction)
-    if HAS_ESE_READER:
-        try:
-            sender = ese_extract_sender(blob)
-            if sender and _is_valid_name(sender):
-                return sender
-        except:
-            pass
-
-    # Look for common name patterns in the blob
-    # Pattern: Look for "Rosetta Stone" marker followed by sender name
-    try:
-        # Search for name-like strings (capitalized words)
-        text = blob.decode('utf-8', errors='ignore')
-
-        # Look for email-like pattern and extract name part
-        import re
-        # Match "Name <email>" or just name patterns
-        email_match = re.search(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*<?[\w\.-]+@', text)
-        if email_match:
-            name = email_match.group(1)
-            if _is_valid_name(name):
-                return name
-
-        # Look for standalone capitalized names (First Last pattern)
-        name_match = re.search(r'\b([A-Z][a-z]{2,15})\s+([A-Z][a-z]{2,15})\b', text)
-        if name_match:
-            name = f"{name_match.group(1)} {name_match.group(2)}"
-            if _is_valid_name(name):
-                return name
-    except:
-        pass
-
-    # Fallback: Look for Admin...istrator pattern
-    if b'Admin' in blob:
-        idx = blob.find(b'Admin')
-        chunk = blob[idx:idx + 30]
-        if b'istrator' in chunk:
-            return 'Administrator'
-
-    return None
-
-
-def extract_email_from_blob(blob):
-    """Extract email address from PropertyBlob."""
-    if not blob:
-        return None
-
-    # Look for @domain pattern
-    at_idx = blob.find(b'@')
-    if at_idx > 0:
-        # Find start of email (backwards from @)
-        start = at_idx - 1
-        while start > 0 and (blob[start-1:start].isalnum() or blob[start-1:start] in [b'.', b'_', b'-']):
-            start -= 1
-        # Find end of email (forwards from @)
-        end = at_idx + 1
-        while end < len(blob) and (blob[end:end+1].isalnum() or blob[end:end+1] in [b'.', b'_', b'-']):
-            end += 1
-        try:
-            email = blob[start:end].decode('ascii', errors='ignore')
-            if '@' in email and '.' in email.split('@')[1]:
-                return email
-        except:
-            pass
-    return None
-
 
 def extract_attachment_filename(blob):
     """Extract attachment filename from PropertyBlob."""
@@ -530,66 +285,6 @@ def extract_attachment_content_type(blob):
 
     return "application/octet-stream"
 
-
-def create_eml_content(email_data):
-    """Create EML content from email data dict."""
-    # Get body content
-    body_text = email_data.get('body_text') or email_data.get('subject') or "(No content)"
-    body_html = email_data.get('body_html', '')
-
-    # Create message
-    if email_data.get('attachments'):
-        msg = MIMEMultipart('mixed')
-
-        # Body part (alternative with text and HTML)
-        body_part = MIMEMultipart('alternative')
-        body_part.attach(MIMEText(body_text, 'plain', 'utf-8'))
-        if body_html:
-            body_part.attach(MIMEText(body_html, 'html', 'utf-8'))
-        msg.attach(body_part)
-
-        # Attachments
-        for filename, content_type, data in email_data['attachments']:
-            if '/' in content_type:
-                maintype, subtype = content_type.split('/', 1)
-            else:
-                maintype, subtype = 'application', 'octet-stream'
-
-            attachment = MIMEBase(maintype, subtype)
-            attachment.set_payload(data)
-            encoders.encode_base64(attachment)
-            attachment.add_header('Content-Disposition', 'attachment', filename=filename)
-            msg.attach(attachment)
-    else:
-        msg = MIMEMultipart('alternative')
-        msg.attach(MIMEText(body_text, 'plain', 'utf-8'))
-        if body_html:
-            msg.attach(MIMEText(body_html, 'html', 'utf-8'))
-
-    # Headers
-    sender = email_data.get('sender_email', 'unknown@unknown.com')
-    if email_data.get('sender_name'):
-        sender = f"{email_data['sender_name']} <{sender}>"
-
-    recipient = email_data.get('recipient_email', sender)
-    if email_data.get('recipient_name'):
-        recipient = f"{email_data['recipient_name']} <{recipient}>"
-
-    msg['From'] = sender
-    msg['To'] = recipient
-    msg['Subject'] = email_data.get('subject') or '(No Subject)'
-
-    if email_data.get('date_sent'):
-        msg['Date'] = format_datetime(email_data['date_sent'])
-
-    if email_data.get('message_id'):
-        msg['Message-ID'] = email_data['message_id']
-
-    msg['X-MS-Has-Attach'] = 'yes' if email_data.get('has_attachments') else ''
-    msg['X-Folder'] = email_data.get('folder_name', 'Unknown')
-    msg['X-Record-Index'] = str(email_data.get('record_index', 0))
-
-    return msg.as_bytes()
 
 
 def is_encrypted_or_binary(data):
@@ -894,8 +589,7 @@ class MainWindow(QMainWindow):
         self.messages_by_folder = defaultdict(list)
         self.current_record_idx = None
         self.current_attachments = []  # List of (filename, content_type, data)
-        self.current_email_data = {}
-        self.current_email_message = None  # EmailMessage object for stable export
+        self.current_email_message = None  # EmailMessage object for export
         self.current_msg_type = 'email'  # 'email', 'calendar', or 'contact'
         self.current_cal_event = None
         self.current_contact = None
@@ -1828,7 +1522,7 @@ class MainWindow(QMainWindow):
                     if owner:
                         self.mailbox_owner = owner
                         owner_lower = owner.lower().replace(' ', '')
-                        self.mailbox_email = f"{owner_lower}@lab.sith.uz"
+                        self.mailbox_email = f"{owner_lower}@unknown"
                         self.owner_label.setText(f"Owner: {self.mailbox_owner} <{self.mailbox_email}>")
                         break
                 except:
@@ -2311,12 +2005,10 @@ class MainWindow(QMainWindow):
             self.current_email_message = email_msg
         profiler.stop("SM: Extract Email")
 
-        # === Detect message type (use CalendarExtractor for proper decompression) ===
+        # === Detect message type (use CalendarExtractor for proper LZXPRESS decompression) ===
         msg_class = ''
         if HAS_CALENDAR_MODULE and hasattr(self, 'calendar_extractor') and self.calendar_extractor:
             msg_class = self.calendar_extractor.get_message_class(record, col_map)
-        if not msg_class and email_msg:
-            msg_class = email_msg.message_class
         is_calendar = (bool(msg_class) and HAS_CALENDAR_MODULE
                        and hasattr(self, 'calendar_extractor') and self.calendar_extractor
                        and self.calendar_extractor.is_calendar_item(msg_class))
@@ -2417,22 +2109,16 @@ class MainWindow(QMainWindow):
             self.header_date.setText(date_str)
         else:
             self._set_header_mode('email')
-            # Fallback - extract basic info
-            sender = extract_sender_from_blob(prop_blob) if prop_blob else None
-            if sender and not is_valid_sender_name(sender):
-                sender = None
-            if not sender and hasattr(self, 'mailbox_owner') and self.mailbox_owner:
-                sender = self.mailbox_owner
-
-            self.header_from.setText(f"{sender} <{sender.lower().replace(' ', '')}@lab.sith.uz>" if sender else "(none)")
+            # Fallback - basic info from DB columns
+            sender = self.mailbox_owner if hasattr(self, 'mailbox_owner') and self.mailbox_owner else ""
+            self.header_from.setText(sender if sender else "(none)")
 
             display_to = get_string_value(record, col_map.get('DisplayTo', -1))
             self.header_to.setText(display_to if display_to else "(none)")
             self.header_cc.setText("(none)")
             self.header_bcc.setText("(none)")
 
-            subject = extract_subject_from_blob(prop_blob) if prop_blob else ""
-            self.header_subject.setText(subject if subject else "(No Subject)")
+            self.header_subject.setText("(No Subject)")
 
             date_sent = get_filetime_value(record, col_map.get('DateSent', -1))
             date_received = get_filetime_value(record, col_map.get('DateReceived', -1))
@@ -2575,40 +2261,15 @@ class MainWindow(QMainWindow):
                     parsed_text += f"  - {att.filename} ({att.size} bytes)\n"
 
         else:
-            # Fallback to old extraction methods - still use Outlook style
+            # Fallback - minimal info from DB columns
             parsed_text += "=" * 60 + "\n"
+            sender = self.mailbox_owner if hasattr(self, 'mailbox_owner') and self.mailbox_owner else ""
+            parsed_text += f"From:      {sender if sender else '(none)'}\n"
 
-            # Extract sender from PropertyBlob
-            sender = None
-            sender_email = ""
-            if prop_blob:
-                sender = extract_sender_from_blob(prop_blob)
-                if sender and not is_valid_sender_name(sender):
-                    sender = None
-            if not sender and hasattr(self, 'mailbox_owner') and self.mailbox_owner:
-                sender = self.mailbox_owner
-            if sender:
-                sender_email = f"{sender.lower().replace(' ', '')}@lab.sith.uz"
-
-            # From:
-            if sender:
-                parsed_text += f"From:      {sender} <{sender_email}>\n"
-            else:
-                parsed_text += f"From:      (none)\n"
-
-            # To:
             display_to = get_string_value(record, col_map.get('DisplayTo', -1))
             parsed_text += f"To:        {display_to if display_to else '(none)'}\n"
+            parsed_text += f"Subject:   (No Subject)\n"
 
-            # Cc: and Bcc:
-            parsed_text += f"Cc:        (none)\n"
-            parsed_text += f"Bcc:       (none)\n"
-
-            # Subject:
-            subject = extract_subject_from_blob(prop_blob) if prop_blob else ""
-            parsed_text += f"Subject:   {subject if subject else '(No Subject)'}\n"
-
-            # Date:
             date_sent = get_filetime_value(record, col_map.get('DateSent', -1))
             date_received = get_filetime_value(record, col_map.get('DateReceived', -1))
             msg_date = date_sent or date_received
@@ -2619,27 +2280,9 @@ class MainWindow(QMainWindow):
             parsed_text += f"Date:      {date_str}\n"
 
             parsed_text += "=" * 60 + "\n\n"
-
-            # Additional metadata
             parsed_text += f"--- Message Details ---\n"
             parsed_text += f"Folder: {folder_name}\n"
             parsed_text += f"Record: #{rec_idx}\n"
-
-            is_read = get_bytes_value(record, col_map.get('IsRead', -1))
-            if is_read:
-                is_read_val = is_read != b'\x00'
-                parsed_text += f"Read: {'Yes' if is_read_val else 'No'}\n"
-
-            has_attach = get_bytes_value(record, col_map.get('HasAttachments', -1))
-            if has_attach:
-                has_attach_val = has_attach != b'\x00'
-                parsed_text += f"Has Attachments: {'Yes' if has_attach_val else 'No'}\n"
-
-            # Extract Message-ID
-            if prop_blob:
-                msgid = extract_message_id_from_blob(prop_blob)
-                if msgid:
-                    parsed_text += f"Message-ID: {msgid}\n"
 
         # PropertyBlob hex info (always show)
         if prop_blob:
@@ -2779,9 +2422,12 @@ a {{ color: #0066cc; }}
         self.current_raw_body_decompressed = body_data_decompressed
         self._update_raw_body_view()
 
-        # Store for EML export - use actual body text if available
-        self.current_email_data['body_text'] = body_text if body_text else ""
-        self.current_email_data['body_html'] = html_source if html_source else ""
+        # Update EmailMessage with rendered body content for export
+        if email_msg:
+            if body_text:
+                email_msg.body_text = body_text
+            if html_source:
+                email_msg.body_html = html_source
 
         profiler.stop("SM: Render Views")
 
@@ -2820,69 +2466,6 @@ a {{ color: #0066cc; }}
                 self.columns_table.setItem(row, 2, QTableWidgetItem("(empty)"))
 
         profiler.stop("SM: Hex/ASCII/Cols")
-
-        # Attachments loaded lazily - build list on demand during export
-        # Attachment format: (filename, content_type, size, is_external, record_idx)
-        eml_attachments = []  # Populated lazily during EML export
-
-        if email_msg:
-            # Use data from EmailMessage object
-            self.current_email_data = {
-                'record_index': email_msg.record_index,
-                'subject': email_msg.subject,
-                'sender_name': email_msg.sender_name,
-                'sender_email': email_msg.sender_email,
-                'recipient_name': email_msg.to_names[0] if email_msg.to_names else email_msg.sender_name,
-                'recipient_email': email_msg.to_emails[0] if email_msg.to_emails else email_msg.sender_email,
-                'message_id': email_msg.message_id,
-                'date_sent': email_msg.date_sent,
-                'folder_name': email_msg.folder_name,
-                'has_attachments': email_msg.has_attachments,
-                'body_text': body_text if body_text else email_msg.subject,
-                'body_html': html_source,
-                'attachments': eml_attachments
-            }
-            # Update EmailMessage with better body content
-            if body_text:
-                email_msg.body_text = body_text
-            if html_source:
-                email_msg.body_html = html_source
-        else:
-            # Fallback to old extraction
-            subject = extract_subject_from_blob(prop_blob) if prop_blob else ""
-            sender = extract_sender_from_blob(prop_blob) if prop_blob else ""
-            msgid = extract_message_id_from_blob(prop_blob) if prop_blob else ""
-
-            has_attach = get_bytes_value(record, col_map.get('HasAttachments', -1))
-            has_attachments = bool(has_attach and has_attach != b'\x00')
-
-            date_sent = get_filetime_value(record, col_map.get('DateSent', -1))
-
-            # Use detected mailbox owner if sender not found
-            if not sender and hasattr(self, 'mailbox_owner') and self.mailbox_owner:
-                sender = self.mailbox_owner
-
-            # Get DisplayTo for recipient
-            display_to = get_string_value(record, col_map.get('DisplayTo', -1))
-            recipient_name = display_to if display_to else sender
-            recipient_email = f"{display_to}@lab.sith.uz" if display_to else (self.mailbox_email if hasattr(self, 'mailbox_email') else "unknown@lab.sith.uz")
-
-            self.current_email_data = {
-                'record_index': rec_idx,
-                'subject': subject,
-                'sender_name': sender,
-                'sender_email': self.mailbox_email if hasattr(self, 'mailbox_email') and self.mailbox_email else f"{sender}@lab.sith.uz" if sender else "unknown@lab.sith.uz",
-                'recipient_name': recipient_name,
-                'recipient_email': recipient_email,
-                'message_id': msgid,
-                'date_sent': date_sent,
-                'folder_name': folder_name,
-                'has_attachments': has_attachments,
-                'body_text': body_text if body_text else subject,
-                'body_html': html_source,
-                'attachments': eml_attachments
-            }
-            self.current_email_message = None
         profiler.stop("Select Message")
 
     def _hexdump(self, data, width=16):
@@ -3194,110 +2777,6 @@ a {{ color: #0066cc; }}
         except:
             return None
 
-    def _load_attachments_for_export(self, record, col_map):
-        """Load attachments for a message record, returning [(filename, content_type, data)]."""
-        has_attach = get_bytes_value(record, col_map.get('HasAttachments', -1))
-        if not has_attach or has_attach == b'\x00':
-            return []
-
-        attach_table_name = f"Attachment_{self.current_mailbox}"
-        attach_table = self.tables.get(attach_table_name)
-        if not attach_table:
-            return []
-
-        attach_col_map = self._cached_attach_col_map if self._cached_attach_col_map else get_column_map(attach_table)
-        inid_to_record = self._cached_inid_to_record if self._cached_inid_to_record else {}
-
-        # Get linked attachment indices via SubobjectsBlob
-        subobjects = get_bytes_value(record, col_map.get('SubobjectsBlob', -1))
-        linked_inids = self._parse_subobjects_blob(subobjects) if subobjects else []
-
-        records_to_load = []
-        if linked_inids and linked_inids != ['FALLBACK']:
-            for inid_val in linked_inids:
-                if inid_val in inid_to_record:
-                    records_to_load.append(inid_to_record[inid_val])
-        elif not subobjects:
-            records_to_load = list(range(attach_table.get_number_of_records()))
-
-        attachments = []
-        for i in records_to_load:
-            try:
-                att_record = attach_table.get_record(i)
-                if not att_record:
-                    continue
-
-                prop_blob = get_bytes_value(att_record, attach_col_map.get('PropertyBlob', -1))
-                content = get_bytes_value(att_record, attach_col_map.get('Content', -1))
-                if not content:
-                    continue
-
-                # Get filename
-                filename = None
-                if prop_blob:
-                    filename = extract_attachment_filename(prop_blob)
-                if not filename:
-                    name_col = get_bytes_value(att_record, attach_col_map.get('Name', -1))
-                    if name_col:
-                        try:
-                            decoded = name_col.decode('utf-16-le').rstrip('\x00')
-                            if decoded and all(c.isprintable() for c in decoded):
-                                filename = decoded
-                        except:
-                            pass
-                if not filename:
-                    filename = f"attachment_{i}.bin"
-
-                # Get content type
-                content_type = "application/octet-stream"
-                if prop_blob:
-                    content_type = extract_attachment_content_type(prop_blob)
-
-                # Get actual data (resolve Long Values)
-                actual_content = content
-                if len(content) == 4:
-                    content_idx = attach_col_map.get('Content', -1)
-                    if content_idx >= 0:
-                        try:
-                            if att_record.is_long_value(content_idx):
-                                lv = att_record.get_value_data_as_long_value(content_idx)
-                                if lv and hasattr(lv, 'get_data'):
-                                    lv_data = lv.get_data()
-                                    if lv_data and len(lv_data) > 0:
-                                        actual_content = lv_data
-                                    else:
-                                        continue
-                                else:
-                                    continue
-                            else:
-                                continue
-                        except:
-                            continue
-                    else:
-                        continue
-                elif content.startswith(b'\xff\xfe'):
-                    try:
-                        actual_content = content.decode('utf-16-le').encode('utf-8')
-                    except:
-                        pass
-
-                attachments.append((filename, content_type, actual_content))
-            except:
-                pass
-
-        return attachments
-
-    def _build_eml_attachments(self):
-        """Build attachment data list for EML export (loads data on demand)."""
-        eml_attachments = []
-        for att in self.current_attachments:
-            is_external = att[3] if len(att) > 3 else False
-            if not is_external:
-                data = self._get_attachment_data(att[4])
-                if data:
-                    eml_attachments.append((att[0], att[1], data))
-        return eml_attachments
-
     def _on_export_message(self):
         """Smart export: EML for emails, ICS for calendar, VCF for contacts."""
         if self.current_msg_type == 'calendar':
@@ -3372,42 +2851,12 @@ a {{ color: #0066cc; }}
     def _on_export_eml(self):
         """Export current message as EML file using stable EmailMessage class."""
         profiler.start("Export EML")
-        # Use new EmailMessage if available
-        if HAS_EMAIL_MODULE and self.current_email_message:
-            subject_safe = re.sub(r'[<>:"/\\|?*]', '_', self.current_email_message.subject or 'no_subject')[:50]
-            default_name = f"record_{self.current_record_idx}_{subject_safe}.eml"
-
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Save Email as EML", default_name,
-                "Email Files (*.eml);;All Files (*.*)"
-            )
-
-            if not path:
-                profiler.stop("Export EML")
-                return
-
-            try:
-                eml_content = self.current_email_message.to_eml()
-                with open(path, 'wb') as f:
-                    f.write(eml_content)
-                self.status.showMessage(f"Exported email to {path}")
-                QMessageBox.information(self, "Export", f"Email saved to:\n{path}")
-            except Exception as e:
-                QMessageBox.critical(self, "Export Error", f"Failed to export email:\n{e}")
-            profiler.stop("Export EML")
-            return
-
-        # Fallback to old method - load attachment data lazily
-        if self.current_email_data and not self.current_email_data.get('attachments'):
-            self.current_email_data['attachments'] = self._build_eml_attachments()
-
-        if not self.current_email_data:
+        if not self.current_email_message:
             QMessageBox.warning(self, "Export", "No message selected")
             profiler.stop("Export EML")
             return
 
-        # Generate default filename
-        subject_safe = re.sub(r'[<>:"/\\|?*]', '_', self.current_email_data.get('subject', 'no_subject'))[:50]
+        subject_safe = re.sub(r'[<>:"/\\|?*]', '_', self.current_email_message.subject or 'no_subject')[:50]
         default_name = f"record_{self.current_record_idx}_{subject_safe}.eml"
 
         path, _ = QFileDialog.getSaveFileName(
@@ -3420,7 +2869,7 @@ a {{ color: #0066cc; }}
             return
 
         try:
-            eml_content = create_eml_content(self.current_email_data)
+            eml_content = self.current_email_message.to_eml()
             with open(path, 'wb') as f:
                 f.write(eml_content)
             self.status.showMessage(f"Exported email to {path}")
@@ -3542,12 +2991,8 @@ a {{ color: #0066cc; }}
                         record, col_map, rec_idx, folder_name=folder_name,
                         tables=self.tables, mailbox_num=self.current_mailbox)
 
-                # Get subject from EmailMessage if available, fallback to blob extraction
-                subject = ''
-                if email_msg and email_msg.subject:
-                    subject = email_msg.subject
-                elif prop_blob:
-                    subject = extract_subject_from_blob(prop_blob)
+                # Get subject from EmailMessage
+                subject = email_msg.subject if email_msg else ''
                 subject_safe = re.sub(r'[<>:"/\\|?*]', '_', subject or 'no_subject')[:50]
 
                 if is_cal:
