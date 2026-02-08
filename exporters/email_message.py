@@ -440,14 +440,15 @@ class EmailExtractor:
 
         return ""
 
-    def _extract_recipient_from_display_to(self, display_to: bytes) -> str:
+    def _extract_recipients_from_display_to(self, display_to: bytes) -> List[str]:
         """
-        Extract recipient name from DisplayTo column.
+        Extract recipient names from DisplayTo column.
 
         DisplayTo is often compressed with LZXPRESS, then UTF-16 LE encoded.
+        Multiple recipients may be separated by semicolons or newlines.
         """
         if not display_to or len(display_to) < 4:
-            return ""
+            return []
 
         text = ""
 
@@ -455,7 +456,6 @@ class EmailExtractor:
         try:
             from dissect.esedb.compression import decompress as dissect_decompress
             decompressed = dissect_decompress(display_to)
-            # Decode as UTF-16 LE
             text = decompressed.decode('utf-16-le', errors='ignore').rstrip('\x00')
         except:
             pass
@@ -469,9 +469,25 @@ class EmailExtractor:
                 pass
 
         if not text:
+            return []
+
+        # Split by common delimiters (semicolons, newlines)
+        import re
+        raw_parts = re.split(r'[;\n\r]+', text)
+
+        recipients = []
+        for raw in raw_parts:
+            name = self._clean_recipient_name(raw.strip())
+            if name:
+                recipients.append(name)
+
+        return recipients
+
+    def _clean_recipient_name(self, text: str) -> str:
+        """Clean a single recipient name from DisplayTo data."""
+        if not text:
             return ""
 
-        # Clean up the extracted text
         # Remove 'audit' suffix
         if text.endswith('audit'):
             text = text[:-5]
@@ -480,23 +496,19 @@ class EmailExtractor:
         if '/' in text:
             parts = text.split('/')
             for part in reversed(parts):
-                # Skip audit suffixes
                 if part.endswith('audit'):
                     part = part[:-5]
-                # Skip empty parts
                 if not part:
                     continue
-                # Skip domain parts (have dots but no spaces, like lab.sith.uz)
                 if '.' in part and ' ' not in part:
                     continue
-                # Skip AD-specific parts
                 if part.startswith('AD') or part.startswith('OU=') or part.startswith('CN='):
                     continue
-                # Found a valid name
                 if part:
                     return part.strip()
+            return ""
 
-        # If it's just a domain name (has dots, no spaces), return empty
+        # If it's just a domain name (has dots, no spaces), skip
         if '.' in text and ' ' not in text:
             return ""
 
@@ -900,16 +912,18 @@ class EmailExtractor:
             msg.sender_email = self._extract_sender_email(prop_blob)
             msg.message_id = self._extract_message_id(prop_blob)
 
-        # Extract recipient from DisplayTo column
+        # Extract recipients from DisplayTo column (handles multiple)
         display_to = self._get_bytes(record, col_map.get('DisplayTo', -1))
         if display_to:
-            recipient_name = self._extract_recipient_from_display_to(display_to)
-            if recipient_name:
-                msg.to_names = [recipient_name]
-                clean_name = recipient_name.lower().replace(' ', '')
-                msg.to_emails = [f"{clean_name}@unknown"]
+            recipient_names = self._extract_recipients_from_display_to(display_to)
+            if recipient_names:
+                msg.to_names = recipient_names
+                msg.to_emails = [
+                    f"{name.lower().replace(' ', '')}@unknown"
+                    for name in recipient_names
+                ]
 
-        # Get body content - extract BEFORE subject so we can use RFC822 sender
+        # Get body content
         native_body = self._get_long_value(record, col_map.get('NativeBody', -1))
         body_text = ""
         if native_body:
@@ -930,9 +944,21 @@ class EmailExtractor:
         if not msg.sender_name and self.mailbox_owner:
             msg.sender_name = self.mailbox_owner
 
-        # Now extract subject using this email's actual sender name
+        # Extract subject using sender name + SubjectPrefix column
         if prop_blob:
             msg.subject = self._extract_subject(prop_blob, msg.sender_name)
+
+        # Try SubjectPrefix column (may have "RE:", "FW:" prefix or full subject)
+        subject_prefix = self._get_string(record, col_map.get('SubjectPrefix', -1))
+        if subject_prefix:
+            prefix = subject_prefix.strip()
+            if prefix:
+                if not msg.subject:
+                    # SubjectPrefix might contain the full subject
+                    msg.subject = prefix
+                elif not msg.subject.startswith(prefix):
+                    # Prepend prefix (e.g., "RE: " + subject)
+                    msg.subject = f"{prefix}{msg.subject}"
 
         # Build sender email if missing
         if msg.sender_name and not msg.sender_email:
