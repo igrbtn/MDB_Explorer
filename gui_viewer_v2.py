@@ -898,6 +898,9 @@ class MainWindow(QMainWindow):
         self.current_attachments = []  # List of (filename, content_type, data)
         self.current_email_data = {}
         self.current_email_message = None  # EmailMessage object for stable export
+        self.current_msg_type = 'email'  # 'email', 'calendar', or 'contact'
+        self.current_cal_event = None
+        self.current_contact = None
         self.email_extractor = None  # EmailExtractor instance
         self.calendar_extractor = None  # CalendarExtractor instance
         self.folder_messages_cache = {}  # Cache: folder_id -> list of message data
@@ -1158,8 +1161,8 @@ class MainWindow(QMainWindow):
         right_export_layout = QHBoxLayout()
         right_export_layout.setSpacing(4)
 
-        self.export_eml_btn2 = QPushButton("Export Message as EML")
-        self.export_eml_btn2.clicked.connect(self._on_export_eml)
+        self.export_eml_btn2 = QPushButton("Export Message (.eml)")
+        self.export_eml_btn2.clicked.connect(self._on_export_message)
         self.export_eml_btn2.setEnabled(False)
         self.export_eml_btn2.setStyleSheet("QPushButton { padding: 4px 12px; font-weight: bold; background-color: #094771; color: #ffffff; border: 1px solid #007acc; }")
         right_export_layout.addWidget(self.export_eml_btn2)
@@ -2344,6 +2347,19 @@ class MainWindow(QMainWindow):
         if is_contact and email_msg:
             contact = self._extract_contact_fields(email_msg, prop_blob)
 
+        # Store for export button
+        self.current_cal_event = cal_event
+        self.current_contact = contact
+        if is_calendar:
+            self.current_msg_type = 'calendar'
+            self.export_eml_btn2.setText("Export Event (.ics)")
+        elif is_contact:
+            self.current_msg_type = 'contact'
+            self.export_eml_btn2.setText("Export Contact (.vcf)")
+        else:
+            self.current_msg_type = 'email'
+            self.export_eml_btn2.setText("Export Message (.eml)")
+
         # === Update Header Labels ===
         profiler.start("SM: Update Headers")
 
@@ -3299,6 +3315,77 @@ a {{ color: #0066cc; }}
                 if data:
                     eml_attachments.append((att[0], att[1], data))
         return eml_attachments
+
+    def _on_export_message(self):
+        """Smart export: EML for emails, ICS for calendar, VCF for contacts."""
+        if self.current_msg_type == 'calendar':
+            self._on_export_single_event()
+        elif self.current_msg_type == 'contact':
+            self._on_export_single_contact()
+        else:
+            self._on_export_eml()
+
+    def _on_export_single_event(self):
+        """Export current calendar event as .ics file."""
+        profiler.start("Export EML")
+        if not self.current_cal_event:
+            QMessageBox.warning(self, "Export", "No calendar event selected")
+            profiler.stop("Export EML")
+            return
+
+        subject_safe = re.sub(r'[<>:"/\\|?*]', '_', self.current_cal_event.subject or 'event')[:50]
+        default_name = f"record_{self.current_record_idx}_{subject_safe}.ics"
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Calendar Event", default_name,
+            "iCalendar Files (*.ics);;All Files (*.*)"
+        )
+        if not path:
+            profiler.stop("Export EML")
+            return
+
+        try:
+            ics_content = self.current_cal_event.to_ics()
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(ics_content)
+            self.status.showMessage(f"Exported event to {path}")
+            QMessageBox.information(self, "Export", f"Calendar event saved to:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"Failed to export event:\n{e}")
+        profiler.stop("Export EML")
+
+    def _on_export_single_contact(self):
+        """Export current contact as .vcf file."""
+        profiler.start("Export EML")
+        if not self.current_contact:
+            QMessageBox.warning(self, "Export", "No contact selected")
+            profiler.stop("Export EML")
+            return
+
+        name_safe = re.sub(r'[<>:"/\\|?*]', '_', self.current_contact.get('name', 'contact'))[:50]
+        default_name = f"record_{self.current_record_idx}_{name_safe}.vcf"
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Contact", default_name,
+            "vCard Files (*.vcf);;All Files (*.*)"
+        )
+        if not path:
+            profiler.stop("Export EML")
+            return
+
+        try:
+            vcard = self._build_vcard(self.current_contact)
+            if not vcard:
+                QMessageBox.warning(self, "Export", "Could not build vCard - no name found")
+                profiler.stop("Export EML")
+                return
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(vcard)
+            self.status.showMessage(f"Exported contact to {path}")
+            QMessageBox.information(self, "Export", f"Contact saved to:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"Failed to export contact:\n{e}")
+        profiler.stop("Export EML")
 
     def _on_export_eml(self):
         """Export current message as EML file using stable EmailMessage class."""
