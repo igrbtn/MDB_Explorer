@@ -1189,57 +1189,57 @@ class MainWindow(QMainWindow):
         label_style = "font-weight: bold; color: #969696;"
         value_style = "color: #d4d4d4;"
 
-        # From:
-        from_label = QLabel("From:")
-        from_label.setStyleSheet(label_style)
+        # Row 0: From / Organizer / Name
+        self.label_row0 = QLabel("From:")
+        self.label_row0.setStyleSheet(label_style)
         self.header_from = QLabel("(none)")
         self.header_from.setStyleSheet(value_style)
         self.header_from.setWordWrap(True)
-        header_layout.addWidget(from_label, 0, 0)
+        header_layout.addWidget(self.label_row0, 0, 0)
         header_layout.addWidget(self.header_from, 0, 1)
 
-        # To:
-        to_label = QLabel("To:")
-        to_label.setStyleSheet(label_style)
+        # Row 1: To / Attendees / Email
+        self.label_row1 = QLabel("To:")
+        self.label_row1.setStyleSheet(label_style)
         self.header_to = QLabel("(none)")
         self.header_to.setStyleSheet(value_style)
         self.header_to.setWordWrap(True)
-        header_layout.addWidget(to_label, 1, 0)
+        header_layout.addWidget(self.label_row1, 1, 0)
         header_layout.addWidget(self.header_to, 1, 1)
 
-        # Cc:
-        cc_label = QLabel("Cc:")
-        cc_label.setStyleSheet(label_style)
+        # Row 2: Cc / Location / Phone
+        self.label_row2 = QLabel("Cc:")
+        self.label_row2.setStyleSheet(label_style)
         self.header_cc = QLabel("(none)")
         self.header_cc.setStyleSheet(value_style)
         self.header_cc.setWordWrap(True)
-        header_layout.addWidget(cc_label, 2, 0)
+        header_layout.addWidget(self.label_row2, 2, 0)
         header_layout.addWidget(self.header_cc, 2, 1)
 
-        # Bcc:
-        bcc_label = QLabel("Bcc:")
-        bcc_label.setStyleSheet(label_style)
+        # Row 3: Bcc / (hidden) / Company
+        self.label_row3 = QLabel("Bcc:")
+        self.label_row3.setStyleSheet(label_style)
         self.header_bcc = QLabel("(none)")
         self.header_bcc.setStyleSheet(value_style)
         self.header_bcc.setWordWrap(True)
-        header_layout.addWidget(bcc_label, 3, 0)
+        header_layout.addWidget(self.label_row3, 3, 0)
         header_layout.addWidget(self.header_bcc, 3, 1)
 
-        # Subject:
-        subject_label = QLabel("Subject:")
-        subject_label.setStyleSheet(label_style)
+        # Row 4: Subject / Subject / Title
+        self.label_row4 = QLabel("Subject:")
+        self.label_row4.setStyleSheet(label_style)
         self.header_subject = QLabel("(No Subject)")
         self.header_subject.setStyleSheet(value_style + " font-weight: bold; color: #ffffff;")
         self.header_subject.setWordWrap(True)
-        header_layout.addWidget(subject_label, 4, 0)
+        header_layout.addWidget(self.label_row4, 4, 0)
         header_layout.addWidget(self.header_subject, 4, 1)
 
-        # Date:
-        date_label = QLabel("Date:")
-        date_label.setStyleSheet(label_style)
+        # Row 5: Date / Start Time / Created
+        self.label_row5 = QLabel("Date:")
+        self.label_row5.setStyleSheet(label_style)
         self.header_date = QLabel("(none)")
         self.header_date.setStyleSheet(value_style)
-        header_layout.addWidget(date_label, 5, 0)
+        header_layout.addWidget(self.label_row5, 5, 0)
         header_layout.addWidget(self.header_date, 5, 1)
 
         # Make value column stretch
@@ -2170,6 +2170,90 @@ class MainWindow(QMainWindow):
         self.filter_attach_cb.setChecked(False)
         self._apply_filters()
 
+    def _set_header_mode(self, mode: str):
+        """Switch header labels between email/calendar/contact modes."""
+        if mode == 'calendar':
+            self.label_row0.setText("Organizer:")
+            self.label_row1.setText("Attendees:")
+            self.label_row2.setText("Location:")
+            self.label_row3.setVisible(False)
+            self.header_bcc.setVisible(False)
+            self.label_row4.setText("Subject:")
+            self.label_row5.setText("Start Time:")
+        elif mode == 'contact':
+            self.label_row0.setText("Name:")
+            self.label_row1.setText("Email:")
+            self.label_row2.setText("Phone:")
+            self.label_row3.setText("Company:")
+            self.label_row3.setVisible(True)
+            self.header_bcc.setVisible(True)
+            self.label_row4.setText("Title:")
+            self.label_row5.setText("Created:")
+        else:  # 'email'
+            self.label_row0.setText("From:")
+            self.label_row1.setText("To:")
+            self.label_row2.setText("Cc:")
+            self.label_row3.setText("Bcc:")
+            self.label_row3.setVisible(True)
+            self.header_bcc.setVisible(True)
+            self.label_row4.setText("Subject:")
+            self.label_row5.setText("Date:")
+
+    def _extract_contact_fields(self, email_msg, prop_blob):
+        """Extract contact-specific fields from existing data (no extra DB reads)."""
+        fields = {
+            'name': '', 'email': '', 'phone': '',
+            'company': '', 'title': '', 'created': ''
+        }
+
+        # Name: from sender or subject
+        fields['name'] = email_msg.sender_name or email_msg.subject or ''
+
+        # Created date
+        created = email_msg.date_sent or email_msg.date_received
+        if created and hasattr(created, 'strftime'):
+            fields['created'] = created.strftime("%a, %d %b %Y %H:%M:%S %z")
+
+        # Extract from PropertyBlob text
+        if prop_blob:
+            blob_text = ''
+            try:
+                if HAS_DISSECT:
+                    from dissect.esedb.compression import decompress as d_decompress
+                    decompressed = d_decompress(prop_blob)
+                    blob_text = decompressed.decode('utf-8', errors='ignore')
+                else:
+                    blob_text = prop_blob.decode('utf-8', errors='ignore')
+            except:
+                blob_text = prop_blob.decode('utf-8', errors='ignore')
+
+            # Email pattern
+            email_match = re.search(r'[\w.-]+@[\w.-]+\.\w{2,}', blob_text)
+            if email_match:
+                fields['email'] = email_match.group()
+
+            # Phone pattern
+            phone_match = re.search(r'[\+]?[\d\s\-\(\)]{7,15}', blob_text)
+            if phone_match:
+                phone = phone_match.group().strip()
+                if len(phone) >= 7:
+                    fields['phone'] = phone
+
+        # Try HTML body for company/title
+        if email_msg.body_html:
+            html_text = email_msg.body_html
+            company_match = re.search(r'(?:company|organization|org)[:\s]*([^<\n]{2,50})',
+                                       html_text, re.IGNORECASE)
+            if company_match:
+                fields['company'] = company_match.group(1).strip()
+
+            title_match = re.search(r'(?:title|position|job)[:\s]*([^<\n]{2,50})',
+                                     html_text, re.IGNORECASE)
+            if title_match:
+                fields['title'] = title_match.group(1).strip()
+
+        return fields
+
     def _on_message_selected(self):
         """Handle message selection."""
         profiler.start("Select Message")
@@ -2234,21 +2318,74 @@ class MainWindow(QMainWindow):
             self.current_email_message = email_msg
         profiler.stop("SM: Extract Email")
 
-        # === Update Header Labels (Outlook-style above tabs) ===
+        # === Detect message type ===
+        msg_class = email_msg.message_class if email_msg else ''
+        is_calendar = (HAS_CALENDAR_MODULE and hasattr(self, 'calendar_extractor')
+                       and self.calendar_extractor
+                       and self.calendar_extractor.is_calendar_item(msg_class))
+        is_contact = msg_class.upper().startswith('IPM.CONTACT') if msg_class else False
+
+        cal_event = None
+        contact = None
+        if is_calendar:
+            cal_event = self.calendar_extractor.extract_event(record, col_map, rec_idx)
+        if is_contact and email_msg:
+            contact = self._extract_contact_fields(email_msg, prop_blob)
+
+        # === Update Header Labels ===
         profiler.start("SM: Update Headers")
-        if email_msg:
+
+        if is_calendar and cal_event:
+            self._set_header_mode('calendar')
+            # Organizer
+            organizer = cal_event.organizer_name or (email_msg.sender_name if email_msg else '') or '(none)'
+            if cal_event.organizer_email:
+                organizer = f"{organizer} <{cal_event.organizer_email}>"
+            self.header_from.setText(organizer)
+            # Attendees
+            attendee_strs = []
+            for att in cal_event.attendees:
+                if att.name and att.email:
+                    attendee_strs.append(f"{att.name} <{att.email}>")
+                elif att.email:
+                    attendee_strs.append(att.email)
+            self.header_to.setText(", ".join(attendee_strs) if attendee_strs else "(none)")
+            # Location
+            self.header_cc.setText(cal_event.location or "(none)")
+            self.header_bcc.setText("")
+            # Subject
+            self.header_subject.setText(cal_event.subject or (email_msg.subject if email_msg else '') or "(No Subject)")
+            # Start Time
+            if cal_event.start_time:
+                start_str = cal_event.start_time.strftime("%a, %d %b %Y %H:%M:%S %z")
+                if cal_event.end_time:
+                    end_str = cal_event.end_time.strftime("%H:%M:%S")
+                    start_str += f" - {end_str}"
+                self.header_date.setText(start_str)
+            else:
+                msg_date = email_msg.date_sent or email_msg.date_received if email_msg else None
+                self.header_date.setText(msg_date.strftime("%a, %d %b %Y %H:%M:%S %z") if msg_date and hasattr(msg_date, 'strftime') else "(none)")
+
+        elif is_contact and contact:
+            self._set_header_mode('contact')
+            self.header_from.setText(contact['name'] or "(none)")
+            self.header_to.setText(contact['email'] or "(none)")
+            self.header_cc.setText(contact['phone'] or "(none)")
+            self.header_bcc.setText(contact['company'] or "(none)")
+            self.header_subject.setText(contact['title'] or "(none)")
+            self.header_date.setText(contact['created'] or "(none)")
+
+        elif email_msg:
+            self._set_header_mode('email')
             # From:
             from_header = email_msg.get_from_header()
             self.header_from.setText(from_header if from_header else "(none)")
-
             # To:
             to_header = email_msg.get_to_header()
             self.header_to.setText(to_header if to_header else "(none)")
-
             # Cc:
             cc_header = email_msg.get_cc_header()
             self.header_cc.setText(cc_header if cc_header else "(none)")
-
             # Bcc:
             bcc_recipients = []
             for i, email in enumerate(email_msg.bcc_emails):
@@ -2259,10 +2396,8 @@ class MainWindow(QMainWindow):
                     bcc_recipients.append(email)
             bcc_header = ", ".join(bcc_recipients) if bcc_recipients else "(none)"
             self.header_bcc.setText(bcc_header)
-
             # Subject:
             self.header_subject.setText(email_msg.subject or "(No Subject)")
-
             # Date:
             msg_date = email_msg.date_sent or email_msg.date_received
             if msg_date:
@@ -2271,6 +2406,7 @@ class MainWindow(QMainWindow):
                 date_str = "(none)"
             self.header_date.setText(date_str)
         else:
+            self._set_header_mode('email')
             # Fallback - extract basic info
             sender = extract_sender_from_blob(prop_blob) if prop_blob else None
             if sender and not is_valid_sender_name(sender):
@@ -2299,12 +2435,79 @@ class MainWindow(QMainWindow):
 
         profiler.stop("SM: Update Headers")
 
-        # === Parsed View - Outlook-style message headers ===
+        # === Parsed View - type-specific message display ===
         profiler.start("SM: Parsed View")
         parsed_text = ""
 
-        if email_msg:
-            # Outlook-style message header
+        if is_calendar and cal_event:
+            # Calendar event view
+            parsed_text += "=" * 60 + "\n"
+            parsed_text += "  CALENDAR EVENT\n"
+            parsed_text += "=" * 60 + "\n\n"
+
+            parsed_text += f"Subject:     {cal_event.subject or '(none)'}\n"
+            parsed_text += f"Location:    {cal_event.location or '(none)'}\n\n"
+
+            if cal_event.start_time:
+                parsed_text += f"Start:       {cal_event.start_time.strftime('%a, %d %b %Y %H:%M:%S %z')}\n"
+            if cal_event.end_time:
+                parsed_text += f"End:         {cal_event.end_time.strftime('%a, %d %b %Y %H:%M:%S %z')}\n"
+            if cal_event.all_day:
+                parsed_text += f"All Day:     Yes\n"
+
+            parsed_text += f"\nOrganizer:   {cal_event.organizer_name or '(none)'}"
+            if cal_event.organizer_email:
+                parsed_text += f" <{cal_event.organizer_email}>"
+            parsed_text += "\n"
+
+            if cal_event.attendees:
+                parsed_text += f"\nAttendees ({len(cal_event.attendees)}):\n"
+                for att in cal_event.attendees:
+                    status_str = f" [{att.status}]" if att.status != "NEEDS-ACTION" else ""
+                    if att.name:
+                        parsed_text += f"  - {att.name} <{att.email}>{status_str}\n"
+                    else:
+                        parsed_text += f"  - {att.email}{status_str}\n"
+
+            parsed_text += f"\n--- Event Details ---\n"
+            parsed_text += f"Status:        {cal_event.status}\n"
+            parsed_text += f"Busy Status:   {cal_event.busy_status}\n"
+            parsed_text += f"Importance:    {cal_event.importance}\n"
+            parsed_text += f"Message Class: {cal_event.message_class}\n"
+            parsed_text += f"Record:        #{rec_idx}\n"
+            parsed_text += f"Folder:        {folder_name}\n"
+
+            if cal_event.is_recurring:
+                parsed_text += f"Recurring:     Yes\n"
+                if cal_event.recurrence_rule:
+                    parsed_text += f"Rule:          {cal_event.recurrence_rule}\n"
+
+            if cal_event.has_reminder:
+                parsed_text += f"Reminder:      {cal_event.reminder_minutes} minutes before\n"
+
+            if cal_event.description:
+                parsed_text += f"\n--- Description ---\n{cal_event.description}\n"
+
+        elif is_contact and contact:
+            # Contact card view
+            parsed_text += "=" * 60 + "\n"
+            parsed_text += "  CONTACT CARD\n"
+            parsed_text += "=" * 60 + "\n\n"
+
+            parsed_text += f"Name:        {contact.get('name', '(none)')}\n"
+            parsed_text += f"Email:       {contact.get('email', '(none)')}\n"
+            parsed_text += f"Phone:       {contact.get('phone', '(none)')}\n"
+            parsed_text += f"Company:     {contact.get('company', '(none)')}\n"
+            parsed_text += f"Title:       {contact.get('title', '(none)')}\n"
+            parsed_text += f"Created:     {contact.get('created', '(none)')}\n"
+
+            parsed_text += f"\n--- Record Details ---\n"
+            parsed_text += f"Message Class: {email_msg.message_class if email_msg else msg_class}\n"
+            parsed_text += f"Record:        #{rec_idx}\n"
+            parsed_text += f"Folder:        {folder_name}\n"
+
+        elif email_msg:
+            # Standard email view
             parsed_text += "=" * 60 + "\n"
 
             # From:
