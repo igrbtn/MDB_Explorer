@@ -2835,6 +2835,7 @@ a {{ color: #0066cc; }}
         inid_to_record = self._cached_inid_to_record if self._cached_inid_to_record else {}
 
         # Load linked attachments only (no fallback to avoid duplicates)
+        profiler.start("LA: Find Records")
         records_to_load = []
         use_fallback = False
 
@@ -2880,7 +2881,9 @@ a {{ color: #0066cc; }}
             records_to_load = list(range(attach_table.get_number_of_records()))
         # If SubobjectsBlob exists but has no 0x21 markers, it may be embedded messages
         # In that case, don't load any attachments from the attachment table
+        profiler.stop("LA: Find Records")
 
+        profiler.start(f"LA: Read {len(records_to_load)} records")
         for i in records_to_load:
             try:
                 att_record = attach_table.get_record(i)
@@ -2971,6 +2974,8 @@ a {{ color: #0066cc; }}
 
             except Exception as e:
                 pass
+
+        profiler.stop(f"LA: Read {len(records_to_load)} records")
 
         count = len(self.current_attachments)
         self.content_tabs.setTabText(2, f"Attachments ({count})")
