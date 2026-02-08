@@ -558,8 +558,8 @@ class EmailExtractor:
         Extract subject from PropertyBlob.
 
         PropertyBlob structure:
-        - ... M 0x0d "Rosetta Stone" M <length> <subject_data> ...
-        - After sender's ending M, the length byte comes directly, then subject data
+        - ... M <length> <sender_name> M <length> <subject_data> ...
+        - Subject typically follows the sender section
 
         For repeat patterns like "AAAA BBBB CCCC":
         - The data is: <length> + encoded pattern (with length as first byte)
@@ -567,40 +567,52 @@ class EmailExtractor:
         if not blob or len(blob) < 50:
             return ""
 
-        # Find the sender section ending with "StoneM" (or similar)
-        sender_end_patterns = [b'StoneM', b'toneM', b'oneM', b'atorM']
-        subject_start = -1
+        # Strategy: scan for M markers (0x4d) with valid length + printable text.
+        # Collect all candidates, then pick the best subject (skip sender, LDAP, Message-ID).
+        skip_words = ['admin', 'exchange', 'recipient', 'fydib', 'pdlt', 'group',
+                      'index', '/o=', '/ou=', '/cn=', 'system', 'adportal']
+        candidates = []
 
-        for pattern in sender_end_patterns:
-            pos = blob.find(pattern)
-            if pos >= 0:
-                subject_start = pos + len(pattern)
-                break
+        for i in range(len(blob) - 5):
+            if blob[i] != 0x4d:  # 'M'
+                continue
+            length = blob[i + 1]
+            if length < 2 or length > 100:
+                continue
+            if i + 2 + length > len(blob):
+                continue
 
-        # After sender marker, the length byte comes directly
-        if subject_start >= 0 and subject_start < len(blob) - 3:
-            length = blob[subject_start]
+            content = blob[i + 2:i + 2 + length]
 
-            if 2 <= length <= 100 and subject_start + 1 + length <= len(blob):
-                # Build the data for decode: include length byte and content
-                subject_data = blob[subject_start:subject_start + 1 + length]
+            # Check for repeat pattern encoding first
+            if self._looks_like_repeat_encoding(content):
+                subject_data = blob[i + 1:i + 2 + length]  # include length byte
+                decoded = self._decode_repeat_pattern(subject_data)
+                if decoded:
+                    return decoded
 
-                # Check for repeat pattern encoding (AAAA BBBB style)
-                content = subject_data[1:]  # Skip length byte for check
-                if self._looks_like_repeat_encoding(content):
-                    return self._decode_repeat_pattern(subject_data)
+            # Skip Message-ID (starts with '<')
+            if content and content[0] == 0x3c:
+                continue
 
-                # Check for Message-ID (skip if starts with '<')
-                if content and content[0] == 0x3c:  # '<'
-                    pass  # Skip, try alternative search
-                else:
-                    # Regular text extraction - trust the pattern
-                    text = self._extract_printable_text(content)
-                    if text:
-                        return text
+            # Extract printable text
+            text = self._extract_printable_text(content)
+            if not text or len(text) < 2:
+                continue
 
-        # No fallback - only return subject when we find proper pattern
-        # This avoids picking up system data like folder names or LDAP paths
+            # Skip system/LDAP strings
+            text_lower = text.lower()
+            if any(w in text_lower for w in skip_words):
+                continue
+
+            # Skip if it looks like a name we already saw (sender)
+            # Subject candidates come after sender in the blob
+            candidates.append((i, text))
+
+        # Return the last valid candidate (subject typically follows sender in blob)
+        if candidates:
+            return candidates[-1][1]
+
         return ""
 
     def _extract_printable_text(self, data: bytes) -> str:
