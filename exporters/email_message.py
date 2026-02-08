@@ -608,42 +608,56 @@ class EmailExtractor:
                     sender_idx = idx
                     break
 
-        # Subject is the entry right after sender
-        if sender_idx >= 0 and sender_idx + 1 < len(entries):
-            content = entries[sender_idx + 1]
-
-            # Check for repeat pattern encoding (AAAA BBBB style)
-            if self._looks_like_repeat_encoding(content):
-                return self._decode_repeat_pattern(bytes([len(content)]) + content)
-
-            text = self._extract_printable_text(content)
-            if text:
-                return text
+        # Subject is the first non-system entry after sender
+        if sender_idx >= 0:
+            for content in entries[sender_idx + 1:]:
+                if self._is_subject_candidate(content, sender_name):
+                    # Check for repeat pattern encoding (AAAA BBBB style)
+                    if self._looks_like_repeat_encoding(content):
+                        return self._decode_repeat_pattern(bytes([len(content)]) + content)
+                    text = self._extract_printable_text(content)
+                    if text:
+                        return text
 
         # Fallback: return first non-system, non-sender, non-email entry
-        sender_lower = sender_name.lower() if sender_name else ""
         for content in entries:
-            # Skip non-printable
-            if not all(32 <= b <= 126 for b in content):
+            if not self._is_subject_candidate(content, sender_name):
                 continue
-            text = content.decode('ascii', errors='ignore')
-            if len(text) < 3:
+            if len(content) < 3:
                 continue
-            # Skip system strings
-            text_lower = text.lower()
-            if any(w in text_lower for w in ['fydib', 'recipients', 'cn=',
-                                              '/o=', '/ou=', 'exchange',
-                                              'indexing', 'bigfunnel']):
-                continue
-            # Skip emails and Message-IDs
-            if '@' in text or text.startswith('<'):
-                continue
-            # Skip sender name
-            if sender_lower and text_lower.strip() == sender_lower.strip():
-                continue
-            return text
+            # Check for repeat pattern encoding
+            if self._looks_like_repeat_encoding(content):
+                return self._decode_repeat_pattern(bytes([len(content)]) + content)
+            text = self._extract_printable_text(content)
+            if text and len(text) >= 3:
+                return text
 
         return ""
+
+    @staticmethod
+    def _is_subject_candidate(content: bytes, sender_name: str = "") -> bool:
+        """Check if an M-entry content could be a subject (not system/sender/email)."""
+        if not content or len(content) < 2:
+            return False
+        # Skip non-printable
+        if not all(32 <= b <= 126 for b in content):
+            return False
+        text_lower = content.lower()
+        # Skip Exchange system paths
+        if any(w in text_lower for w in [b'fydib', b'recipients', b'cn=',
+                                          b'/o=', b'/ou=', b'nistrative',
+                                          b'exchange', b'indexing', b'bigfunnel',
+                                          b'administrative']):
+            return False
+        # Skip emails and Message-IDs
+        if b'@' in content or content.startswith(b'<'):
+            return False
+        # Skip sender name
+        if sender_name:
+            sender_bytes = sender_name.lower().encode('ascii', errors='ignore')
+            if text_lower.strip() == sender_bytes.strip():
+                return False
+        return True
 
     def _extract_printable_text(self, data: bytes) -> str:
         """Extract printable ASCII text from bytes."""
