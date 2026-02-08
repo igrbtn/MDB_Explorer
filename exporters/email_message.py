@@ -1021,10 +1021,21 @@ class EmailExtractor:
         return bool(val and val != b'\x00')
 
     def _get_string(self, record, col_idx: int) -> str:
-        """Get string value from record column."""
+        """Get string value from record column (handles LZXPRESS compression)."""
         val = self._get_bytes(record, col_idx)
         if not val:
             return ""
+
+        # Try decompression first (LongText columns may be compressed)
+        try:
+            from dissect.esedb.compression import decompress as dissect_decompress
+            decompressed = dissect_decompress(val)
+            text = decompressed.decode('utf-16-le', errors='ignore').rstrip('\x00')
+            if text and any(c.isprintable() for c in text):
+                return text
+        except:
+            pass
+
         return self.try_decode(val)
 
     def _get_filetime(self, record, col_idx: int) -> Optional[datetime]:
