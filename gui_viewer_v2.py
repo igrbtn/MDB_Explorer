@@ -2318,10 +2318,14 @@ class MainWindow(QMainWindow):
             self.current_email_message = email_msg
         profiler.stop("SM: Extract Email")
 
-        # === Detect message type ===
-        msg_class = email_msg.message_class if email_msg else ''
-        is_calendar = (HAS_CALENDAR_MODULE and hasattr(self, 'calendar_extractor')
-                       and self.calendar_extractor
+        # === Detect message type (use CalendarExtractor for proper decompression) ===
+        msg_class = ''
+        if HAS_CALENDAR_MODULE and hasattr(self, 'calendar_extractor') and self.calendar_extractor:
+            msg_class = self.calendar_extractor.get_message_class(record, col_map)
+        if not msg_class and email_msg:
+            msg_class = email_msg.message_class
+        is_calendar = (bool(msg_class) and HAS_CALENDAR_MODULE
+                       and hasattr(self, 'calendar_extractor') and self.calendar_extractor
                        and self.calendar_extractor.is_calendar_item(msg_class))
         is_contact = msg_class.upper().startswith('IPM.CONTACT') if msg_class else False
 
