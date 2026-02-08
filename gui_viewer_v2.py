@@ -1170,6 +1170,12 @@ class MainWindow(QMainWindow):
         self.export_calendar_btn.setToolTip("Export calendar items from this folder to .ics file")
         right_export_layout.addWidget(self.export_calendar_btn)
 
+        self.export_contacts_btn = QPushButton("Export Contacts (.vcf)")
+        self.export_contacts_btn.clicked.connect(self._on_export_contacts)
+        self.export_contacts_btn.setEnabled(False)
+        self.export_contacts_btn.setToolTip("Export contacts from this folder to .vcf file")
+        right_export_layout.addWidget(self.export_contacts_btn)
+
         self.export_attach_btn = QPushButton("Export Attachments")
         self.export_attach_btn.clicked.connect(self._on_export_attachments)
         self.export_attach_btn.setEnabled(False)
@@ -1908,6 +1914,7 @@ class MainWindow(QMainWindow):
         self.all_messages_cache = []
         self.export_folder_btn.setEnabled(False)
         self.export_calendar_btn.setEnabled(False)
+        self.export_contacts_btn.setEnabled(False)
         self.export_eml_btn2.setEnabled(False)
         self.export_attach_btn.setEnabled(False)
 
@@ -1920,6 +1927,7 @@ class MainWindow(QMainWindow):
         self.current_folder_id = folder_id
         self.export_folder_btn.setEnabled(True)
         self.export_calendar_btn.setEnabled(HAS_CALENDAR_MODULE)
+        self.export_contacts_btn.setEnabled(True)
         message_indices = self.messages_by_folder.get(folder_id, [])
 
         if not message_indices:
@@ -3579,6 +3587,171 @@ a {{ color: #0066cc; }}
         else:
             QMessageBox.warning(self, "Export Error", "Failed to export calendar items")
         profiler.stop("Export Calendar")
+
+    def _on_export_contacts(self):
+        """Export contacts from the current folder to .vcf file."""
+        profiler.start("Export Contacts")
+
+        items = self.folder_tree.selectedItems()
+        if not items:
+            QMessageBox.warning(self, "Export", "No folder selected")
+            profiler.stop("Export Contacts")
+            return
+
+        folder_id = items[0].data(0, Qt.ItemDataRole.UserRole)
+        folder_name = self.folders.get(folder_id, {}).get('display_name', 'Unknown')
+        message_indices = self.messages_by_folder.get(folder_id, [])
+
+        if not message_indices:
+            QMessageBox.warning(self, "Export", "No messages in this folder")
+            profiler.stop("Export Contacts")
+            return
+
+        msg_table_name = f"Message_{self.current_mailbox}"
+        msg_table = self.tables.get(msg_table_name)
+
+        if not msg_table:
+            profiler.stop("Export Contacts")
+            return
+
+        col_map = self._cached_msg_col_map if self._cached_msg_col_map else get_column_map(msg_table)
+
+        # Collect contacts
+        vcards = []
+        self.progress.setVisible(True)
+        self.progress.setRange(0, len(message_indices))
+
+        for idx, rec_idx in enumerate(message_indices):
+            self.progress.setValue(idx + 1)
+            if idx % 20 == 0:
+                QApplication.processEvents()
+
+            try:
+                record = msg_table.get_record(rec_idx)
+                if not record:
+                    continue
+
+                # Check if this is a contact item
+                msg_class = ''
+                if HAS_CALENDAR_MODULE and self.calendar_extractor:
+                    msg_class = self.calendar_extractor.get_message_class(record, col_map)
+                if not msg_class:
+                    continue
+                if not msg_class.upper().startswith('IPM.CONTACT'):
+                    continue
+
+                # Extract contact fields using EmailExtractor + _extract_contact_fields
+                email_msg = None
+                if HAS_EMAIL_MODULE and self.email_extractor:
+                    email_msg = self.email_extractor.extract_message(
+                        record, col_map, rec_idx,
+                        folder_name=folder_name,
+                        tables=self.tables,
+                        mailbox_num=self.current_mailbox
+                    )
+
+                prop_blob = get_bytes_value(record, col_map.get('PropertyBlob', -1))
+
+                if email_msg:
+                    contact = self._extract_contact_fields(email_msg, prop_blob)
+                else:
+                    contact = {'name': '', 'email': '', 'phone': '',
+                               'company': '', 'title': '', 'created': ''}
+
+                # Build vCard
+                vcard = self._build_vcard(contact)
+                if vcard:
+                    vcards.append(vcard)
+
+            except Exception as e:
+                self.status.showMessage(f"Error processing record {rec_idx}: {e}")
+
+        self.progress.setVisible(False)
+
+        if not vcards:
+            QMessageBox.information(self, "Export Contacts",
+                f"No contacts found in '{folder_name}'.\n\n"
+                f"Contact items have message class: IPM.Contact")
+            profiler.stop("Export Contacts")
+            return
+
+        # Ask for output file
+        output_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Contacts File",
+            f"{folder_name.replace(' ', '_')}_contacts.vcf",
+            "vCard Files (*.vcf);;All Files (*.*)"
+        )
+
+        if not output_path:
+            profiler.stop("Export Contacts")
+            return
+
+        # Write all vCards to single file
+        try:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write('\r\n'.join(vcards))
+
+            self.status.showMessage(f"Exported {len(vcards)} contacts to {output_path}")
+            QMessageBox.information(self, "Export Contacts",
+                f"Exported {len(vcards)} contacts from '{folder_name}' to:\n{output_path}")
+        except Exception as e:
+            QMessageBox.warning(self, "Export Error", f"Failed to export contacts: {e}")
+
+        profiler.stop("Export Contacts")
+
+    def _build_vcard(self, contact: dict) -> str:
+        """Build a vCard 3.0 string from contact fields."""
+        name = contact.get('name', '').strip()
+        if not name:
+            return ''
+
+        lines = []
+        lines.append("BEGIN:VCARD")
+        lines.append("VERSION:3.0")
+
+        # Full name
+        lines.append(f"FN:{self._vcard_escape(name)}")
+
+        # Structured name (try to split into last/first)
+        parts = name.split()
+        if len(parts) >= 2:
+            lines.append(f"N:{self._vcard_escape(parts[-1])};{self._vcard_escape(' '.join(parts[:-1]))}")
+        else:
+            lines.append(f"N:{self._vcard_escape(name)};;;")
+
+        # Email
+        email = contact.get('email', '').strip()
+        if email:
+            lines.append(f"EMAIL;TYPE=INTERNET:{email}")
+
+        # Phone
+        phone = contact.get('phone', '').strip()
+        if phone:
+            lines.append(f"TEL;TYPE=WORK:{phone}")
+
+        # Company
+        company = contact.get('company', '').strip()
+        if company:
+            lines.append(f"ORG:{self._vcard_escape(company)}")
+
+        # Title
+        title = contact.get('title', '').strip()
+        if title:
+            lines.append(f"TITLE:{self._vcard_escape(title)}")
+
+        lines.append("END:VCARD")
+        return '\r\n'.join(lines)
+
+    @staticmethod
+    def _vcard_escape(text: str) -> str:
+        """Escape special characters for vCard format."""
+        if not text:
+            return ''
+        text = text.replace('\\', '\\\\')
+        text = text.replace(',', '\\,')
+        text = text.replace(';', '\\;')
+        text = text.replace('\n', '\\n')
+        return text
 
     def _get_folder_path(self, folder_id: str) -> str:
         """Build full folder hierarchy path by traversing parent_id chain.
