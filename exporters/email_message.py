@@ -570,8 +570,9 @@ class EmailExtractor:
         Extract subject from PropertyBlob by scanning M-marker entries.
 
         PropertyBlob contains sequential M entries: M<length><data>
-        Structure: [system paths] [sender_name] [SUBJECT] [subject_dup] [message-id] ...
-        Subject is the entry immediately after the sender name entry.
+        Structure: [system] [sender] [SUBJECT] [subject_dup] [Message-ID] ...
+        Primary strategy: subject is right before the Message-ID entry.
+        Secondary: subject is right after sender, skipping recipients.
         """
         if not blob or len(blob) < 50:
             return ""
@@ -599,65 +600,104 @@ class EmailExtractor:
         if not entries:
             return ""
 
-        # Find sender entry index
+        # Classify entries
+        sender_lower = sender_name.lower().encode('ascii', errors='ignore') if sender_name else b''
+        msg_id_idx = -1
         sender_idx = -1
-        if sender_name and len(sender_name) >= 2:
-            sender_bytes = sender_name.encode('ascii', errors='ignore')
-            for idx, content in enumerate(entries):
-                if content == sender_bytes or content.rstrip(b'\x00') == sender_bytes:
-                    sender_idx = idx
-                    break
 
-        # Subject is the first non-system entry after sender
+        for idx, content in enumerate(entries):
+            # Find Message-ID (starts with '<', contains '@')
+            if content.startswith(b'<') and b'@' in content:
+                msg_id_idx = idx
+                break
+            # Find sender by exact match (case-insensitive)
+            if sender_lower and content.lower().rstrip(b'\x00').strip() == sender_lower.strip():
+                sender_idx = idx
+
+        # Strategy 1: Subject is right before Message-ID
+        # (or 2 entries before if there's a duplicate)
+        if msg_id_idx >= 2:
+            # Check entry right before Message-ID
+            candidate = entries[msg_id_idx - 1]
+            result = self._try_extract_subject_entry(candidate, sender_name)
+            if result:
+                return result
+            # If that was a duplicate, check one more back
+            if msg_id_idx >= 3:
+                candidate = entries[msg_id_idx - 2]
+                result = self._try_extract_subject_entry(candidate, sender_name)
+                if result:
+                    return result
+
+        # Strategy 2: Subject is after sender, skipping system/recipient entries
         if sender_idx >= 0:
             for content in entries[sender_idx + 1:]:
-                if self._is_subject_candidate(content, sender_name):
-                    # Check for repeat pattern encoding (AAAA BBBB style)
-                    if self._looks_like_repeat_encoding(content):
-                        return self._decode_repeat_pattern(bytes([len(content)]) + content)
-                    text = self._extract_printable_text(content)
-                    if text:
-                        return text
+                if self._is_system_entry(content):
+                    continue
+                if b'@' in content or content.startswith(b'<'):
+                    continue
+                # Skip entries matching sender name
+                if sender_lower and content.lower().strip() == sender_lower.strip():
+                    continue
+                result = self._try_extract_subject_entry(content, sender_name)
+                if result:
+                    return result
 
-        # Fallback: return first non-system, non-sender, non-email entry
+        # Fallback: first non-system, non-sender, non-email entry
         for content in entries:
-            if not self._is_subject_candidate(content, sender_name):
+            if self._is_system_entry(content):
+                continue
+            if b'@' in content or content.startswith(b'<'):
+                continue
+            if sender_lower and content.lower().strip() == sender_lower.strip():
                 continue
             if len(content) < 3:
                 continue
-            # Check for repeat pattern encoding
-            if self._looks_like_repeat_encoding(content):
-                return self._decode_repeat_pattern(bytes([len(content)]) + content)
-            text = self._extract_printable_text(content)
-            if text and len(text) >= 3:
-                return text
+            result = self._try_extract_subject_entry(content, sender_name)
+            if result:
+                return result
 
         return ""
 
-    @staticmethod
-    def _is_subject_candidate(content: bytes, sender_name: str = "") -> bool:
-        """Check if an M-entry content could be a subject (not system/sender/email)."""
+    def _try_extract_subject_entry(self, content: bytes, sender_name: str = "") -> str:
+        """Try to extract subject text from an M-entry. Returns text or empty string."""
         if not content or len(content) < 2:
-            return False
-        # Skip non-printable
-        if not all(32 <= b <= 126 for b in content):
-            return False
-        text_lower = content.lower()
-        # Skip Exchange system paths
-        if any(w in text_lower for w in [b'fydib', b'recipients', b'cn=',
-                                          b'/o=', b'/ou=', b'nistrative',
-                                          b'exchange', b'indexing', b'bigfunnel',
-                                          b'administrative']):
-            return False
+            return ""
+        # Skip system entries
+        if self._is_system_entry(content):
+            return ""
         # Skip emails and Message-IDs
         if b'@' in content or content.startswith(b'<'):
-            return False
+            return ""
         # Skip sender name
         if sender_name:
-            sender_bytes = sender_name.lower().encode('ascii', errors='ignore')
-            if text_lower.strip() == sender_bytes.strip():
-                return False
-        return True
+            sender_lower = sender_name.lower().encode('ascii', errors='ignore')
+            if content.lower().rstrip(b'\x00').strip() == sender_lower.strip():
+                return ""
+        # Check for repeat pattern encoding (AAAA BBBB style)
+        if self._looks_like_repeat_encoding(content):
+            return self._decode_repeat_pattern(bytes([len(content)]) + content)
+        # Extract printable text
+        text = self._extract_printable_text(content)
+        if text:
+            # Strip trailing ":EX" or similar artifacts
+            if text.endswith(':EX') or text.endswith(':ex'):
+                text = text[:-3].strip()
+            return text
+        return ""
+
+    @staticmethod
+    def _is_system_entry(content: bytes) -> bool:
+        """Check if M-entry content is a system/Exchange path."""
+        if not content:
+            return True
+        if not all(32 <= b <= 126 for b in content):
+            return True
+        text_lower = content.lower()
+        return any(w in text_lower for w in [b'fydib', b'recipients', b'cn=',
+                                              b'/o=', b'/ou=', b'nistrative',
+                                              b'administrative', b'indexing',
+                                              b'bigfunnel', b':ex'])
 
     def _extract_printable_text(self, data: bytes) -> str:
         """Extract printable ASCII text from bytes."""
