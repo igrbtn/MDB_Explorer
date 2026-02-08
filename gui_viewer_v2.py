@@ -905,6 +905,7 @@ class MainWindow(QMainWindow):
         self._cached_msg_columns = None
         self._cached_attach_col_map = None
         self._cached_inid_to_record = None
+        self._cached_msgdocid_to_attach = None
         self.debug_mode = False
         self.profiler_dialog = None
 
@@ -1450,6 +1451,7 @@ class MainWindow(QMainWindow):
         self._cached_msg_columns = None
         self._cached_attach_col_map = None
         self._cached_inid_to_record = None
+        self._cached_msgdocid_to_attach = None
 
         try:
             self._load_folders()
@@ -1486,6 +1488,7 @@ class MainWindow(QMainWindow):
             self._cached_attach_col_map = attach_col_map
 
             inid_to_record = {}
+            msgdocid_to_attach = {}
             for i in range(attach_table.get_number_of_records()):
                 try:
                     att_record = attach_table.get_record(i)
@@ -1495,9 +1498,16 @@ class MainWindow(QMainWindow):
                     if inid and len(inid) >= 4:
                         inid_val = struct.unpack('<I', inid[:4])[0]
                         inid_to_record[inid_val] = i
+                    # Also index by MessageDocumentId for fallback lookups
+                    att_msg_id = get_int_value(att_record, attach_col_map.get('MessageDocumentId', -1))
+                    if att_msg_id:
+                        if att_msg_id not in msgdocid_to_attach:
+                            msgdocid_to_attach[att_msg_id] = []
+                        msgdocid_to_attach[att_msg_id].append(i)
                 except:
                     pass
             self._cached_inid_to_record = inid_to_record
+            self._cached_msgdocid_to_attach = msgdocid_to_attach
 
         profiler.stop("Build Caches")
 
@@ -2844,41 +2854,16 @@ a {{ color: #0066cc; }}
                 if inid_val in inid_to_record:
                     records_to_load.append(inid_to_record[inid_val])
         elif linked_inids == ['FALLBACK'] and subobjects:
-            # SubobjectsBlob exists but uses different format - try fallback
+            # SubobjectsBlob exists but uses different format - use cached MessageDocumentId lookup
             use_fallback = True
-            # Try to find attachments that might belong to this message
-            # by checking MessageDocumentId or scanning recently added attachments
             msg_doc_id = get_int_value(record, col_map.get('MessageDocumentId', -1))
-            if msg_doc_id:
-                # Try to find attachments with matching MessageDocumentId
-                for i in range(attach_table.get_number_of_records()):
-                    try:
-                        att_record = attach_table.get_record(i)
-                        if not att_record:
-                            continue
-                        att_msg_id = get_int_value(att_record, attach_col_map.get('MessageDocumentId', -1))
-                        if att_msg_id and att_msg_id == msg_doc_id:
-                            records_to_load.append(i)
-                    except:
-                        pass
-
-            # If still no attachments found, try scanning for unlinked attachments
-            if not records_to_load:
-                # Get all attachments that haven't been linked to other messages
-                # This is a heuristic - load all attachments and let user see them
-                for i in range(attach_table.get_number_of_records()):
-                    att_record = attach_table.get_record(i)
-                    if att_record:
-                        content = get_bytes_value(att_record, attach_col_map.get('Content', -1))
-                        size = get_bytes_value(att_record, attach_col_map.get('Size', -1))
-                        size_val = struct.unpack('<Q', size)[0] if size and len(size) == 8 else 0
-                        # Look for large attachments (like sithTA.zip ~3.3MB)
-                        if size_val > 1000000:
-                            records_to_load.append(i)
+            if msg_doc_id and self._cached_msgdocid_to_attach:
+                records_to_load = list(self._cached_msgdocid_to_attach.get(msg_doc_id, []))
         elif not subobjects:
-            # Only fallback if SubobjectsBlob is completely missing (very old database)
-            # This maintains backward compatibility while avoiding duplicates
-            records_to_load = list(range(attach_table.get_number_of_records()))
+            # No SubobjectsBlob - use cached MessageDocumentId lookup instead of scanning all records
+            msg_doc_id = get_int_value(record, col_map.get('MessageDocumentId', -1))
+            if msg_doc_id and self._cached_msgdocid_to_attach:
+                records_to_load = list(self._cached_msgdocid_to_attach.get(msg_doc_id, []))
         # If SubobjectsBlob exists but has no 0x21 markers, it may be embedded messages
         # In that case, don't load any attachments from the attachment table
         profiler.stop("LA: Find Records")
