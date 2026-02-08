@@ -19,6 +19,7 @@ class Profiler:
     def __init__(self):
         self._starts = {}
         self._stats = {}  # name -> {'count': int, 'total': float, 'last': float}
+        self._log = []  # List of (timestamp, name, elapsed_ms)
 
     def start(self, name):
         self._starts[name] = time.perf_counter()
@@ -32,6 +33,7 @@ class Profiler:
         self._stats[name]['count'] += 1
         self._stats[name]['total'] += elapsed
         self._stats[name]['last'] = elapsed
+        self._log.append((time.time(), name, elapsed * 1000))
 
     def get_stats(self):
         """Return list of (name, count, total_s, avg_ms, last_ms) sorted by total desc."""
@@ -42,9 +44,30 @@ class Profiler:
         result.sort(key=lambda x: x[2], reverse=True)
         return result
 
+    def get_log(self):
+        """Return chronological log of all operations."""
+        return list(self._log)
+
+    def export_csv(self, filepath):
+        """Export stats and log to CSV file."""
+        import csv
+        with open(filepath, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(["=== PROFILER STATS ==="])
+            writer.writerow(["Operation", "Calls", "Total (s)", "Avg (ms)", "Last (ms)"])
+            for name, count, total, avg_ms, last_ms in self.get_stats():
+                writer.writerow([name, count, round(total, 3), round(avg_ms, 1), round(last_ms, 1)])
+            writer.writerow([])
+            writer.writerow(["=== OPERATION LOG ==="])
+            writer.writerow(["Timestamp", "Operation", "Duration (ms)"])
+            for ts, name, elapsed_ms in self._log:
+                dt = datetime.fromtimestamp(ts).strftime("%H:%M:%S.%f")[:-3]
+                writer.writerow([dt, name, round(elapsed_ms, 2)])
+
     def clear(self):
         self._starts.clear()
         self._stats.clear()
+        self._log.clear()
 
 
 profiler = Profiler()
@@ -807,6 +830,9 @@ class ProfilerDialog(QDialog):
         clear_btn = QPushButton("Clear")
         clear_btn.clicked.connect(self._on_clear)
         btn_layout.addWidget(clear_btn)
+        export_btn = QPushButton("Export CSV")
+        export_btn.clicked.connect(self._on_export_csv)
+        btn_layout.addWidget(export_btn)
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
 
@@ -838,6 +864,15 @@ class ProfilerDialog(QDialog):
     def _on_clear(self):
         profiler.clear()
         self.refresh()
+
+    def _on_export_csv(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Profiler Data", "profiler_stats.csv",
+            "CSV Files (*.csv);;All Files (*.*)"
+        )
+        if path:
+            profiler.export_csv(path)
+            QMessageBox.information(self, "Export", f"Profiler data exported to:\n{path}")
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -2142,7 +2177,9 @@ class MainWindow(QMainWindow):
         if not msg_table:
             return
 
+        profiler.start("SM: Get Record")
         record = msg_table.get_record(rec_idx)
+        profiler.stop("SM: Get Record")
         if not record:
             return
 
@@ -2163,7 +2200,9 @@ class MainWindow(QMainWindow):
                     columns.append((i, col.name, col.type))
 
         # Get PropertyBlob
+        profiler.start("SM: PropertyBlob")
         prop_blob = get_bytes_value(record, col_map.get('PropertyBlob', -1))
+        profiler.stop("SM: PropertyBlob")
 
         # Load attachments
         self._load_attachments(rec_idx, record, col_map)
@@ -2173,6 +2212,7 @@ class MainWindow(QMainWindow):
         folder_name = self.folders.get(folder_id, {}).get('display_name', 'Unknown')
 
         # === Create EmailMessage for structured extraction ===
+        profiler.start("SM: Extract Email")
         email_msg = None
         if HAS_EMAIL_MODULE and self.email_extractor:
             email_msg = self.email_extractor.extract_message(
@@ -2182,8 +2222,10 @@ class MainWindow(QMainWindow):
                 mailbox_num=self.current_mailbox
             )
             self.current_email_message = email_msg
+        profiler.stop("SM: Extract Email")
 
         # === Update Header Labels (Outlook-style above tabs) ===
+        profiler.start("SM: Update Headers")
         if email_msg:
             # From:
             from_header = email_msg.get_from_header()
@@ -2245,7 +2287,10 @@ class MainWindow(QMainWindow):
                 date_str = "(none)"
             self.header_date.setText(date_str)
 
+        profiler.stop("SM: Update Headers")
+
         # === Parsed View - Outlook-style message headers ===
+        profiler.start("SM: Parsed View")
         parsed_text = ""
 
         if email_msg:
@@ -2382,8 +2427,10 @@ class MainWindow(QMainWindow):
                 parsed_text += f"\nExchange DN: {dn_clean.decode('ascii', errors='ignore')}\n"
 
         self.parsed_view.setPlainText(parsed_text)
+        profiler.stop("SM: Parsed View")
 
         # === Body View ===
+        profiler.start("SM: Body Decode")
         body_text = ""
         html_source = ""
         body_data_raw = None
@@ -2447,7 +2494,10 @@ class MainWindow(QMainWindow):
                     body_text = "--- Extracted from PropertyBlob ---\n\n"
                     body_text += '\n'.join(s.decode('ascii', errors='ignore') for s in strings[:10])
 
+        profiler.stop("SM: Body Decode")
+
         # Set Body (Text) view
+        profiler.start("SM: Render Views")
         if body_text:
             self.body_view.setPlainText(body_text)
         else:
@@ -2510,7 +2560,10 @@ a {{ color: #0066cc; }}
         self.current_email_data['body_text'] = body_text if body_text else ""
         self.current_email_data['body_html'] = html_source if html_source else ""
 
+        profiler.stop("SM: Render Views")
+
         # === Hex View ===
+        profiler.start("SM: Hex/ASCII/Cols")
         if prop_blob:
             hex_text = f"PropertyBlob - {len(prop_blob)} bytes\n{'='*50}\n\n"
             hex_text += self._hexdump(prop_blob)
@@ -2542,6 +2595,8 @@ a {{ color: #0066cc; }}
                 self.columns_table.setItem(row, 2, QTableWidgetItem(display))
             else:
                 self.columns_table.setItem(row, 2, QTableWidgetItem("(empty)"))
+
+        profiler.stop("SM: Hex/ASCII/Cols")
 
         # Attachments loaded lazily - build list on demand during export
         # Attachment format: (filename, content_type, size, is_external, record_idx)
