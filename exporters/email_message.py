@@ -553,83 +553,95 @@ class EmailExtractor:
 
         return header_value.strip(), ""
 
-    def _extract_subject(self, blob: bytes) -> str:
+    def _extract_subject(self, blob: bytes, sender_name: str = "") -> str:
         """
         Extract subject from PropertyBlob.
 
-        PropertyBlob structure:
-        - ... M 0x0d "Rosetta Stone" M <length> <subject_data> ...
-        - After sender's ending M, the length byte comes directly, then subject data
-
-        For repeat patterns like "AAAA BBBB CCCC":
-        - The data is: <length> + encoded pattern (with length as first byte)
+        Uses the known sender_name to locate the subject: find the sender in the
+        decompressed blob, then the next M-marker entry after it is the subject.
         """
         if not blob or len(blob) < 50:
             return ""
 
-        # Find the sender section ending with "StoneM" (or similar)
-        sender_end_patterns = [b'StoneM', b'toneM', b'oneM', b'atorM']
-        subject_start = -1
+        # Decompress blob first (same as _extract_sender does)
+        try:
+            from dissect.esedb.compression import decompress as dissect_decompress
+            blob = dissect_decompress(blob)
+        except:
+            pass
 
-        for pattern in sender_end_patterns:
-            pos = blob.find(pattern)
-            if pos >= 0:
-                subject_start = pos + len(pattern)
-                break
+        # Strategy: find sender_name in blob, then get next M-marker entry after it
+        if sender_name and len(sender_name) >= 2:
+            sender_bytes = sender_name.encode('ascii', errors='ignore')
+            sender_pos = blob.find(sender_bytes)
 
-        # After sender marker, the length byte comes directly
-        if subject_start >= 0 and subject_start < len(blob) - 3:
-            length = blob[subject_start]
+            if sender_pos >= 0:
+                # Search for M marker entries after the sender name
+                search_start = sender_pos + len(sender_bytes)
 
-            if 2 <= length <= 100 and subject_start + 1 + length <= len(blob):
-                # Build the data for decode: include length byte and content
-                subject_data = blob[subject_start:subject_start + 1 + length]
+                for i in range(search_start, min(search_start + 200, len(blob) - 3)):
+                    if blob[i] != ord('M'):
+                        continue
+                    length = blob[i + 1]
+                    if length < 2 or length > 100:
+                        continue
+                    if i + 2 + length > len(blob):
+                        continue
 
-                # Check for repeat pattern encoding (AAAA BBBB style)
-                content = subject_data[1:]  # Skip length byte for check
-                if self._looks_like_repeat_encoding(content):
-                    return self._decode_repeat_pattern(subject_data)
+                    content = blob[i + 2:i + 2 + length]
 
-                # Check for Message-ID (skip if starts with '<')
-                if content and content[0] == 0x3c:  # '<'
-                    pass  # Skip, try alternative search
-                else:
-                    # Regular text extraction - trust the pattern
+                    # Skip email addresses
+                    if b'@' in content:
+                        continue
+                    # Skip Message-IDs
+                    if content.startswith(b'<'):
+                        continue
+                    # Skip Exchange paths and system strings
+                    if any(p in content for p in [b'/O=', b'/OU=', b'CN=', b'EX:', b'http', b'schema']):
+                        continue
+
+                    # Check for repeat pattern encoding (AAAA BBBB style)
+                    if self._looks_like_repeat_encoding(content):
+                        return self._decode_repeat_pattern(bytes([length]) + content)
+
+                    # Extract as printable text
                     text = self._extract_printable_text(content)
-                    if text:
+                    if text and len(text) >= 2:
                         return text
 
-        # Fallback: scan M/K markers, collect candidates (sender=1st, subject=2nd)
-        skip_words = ['admin', 'exchange', 'recipient', 'labsith', 'fydib',
-                      'pdlt', 'group', 'index', 'system', 'mailbox']
+        # Fallback: scan all M markers, skip known non-subject entries
+        skip_patterns = [b'/O=', b'/OU=', b'CN=', b'EX:', b'http', b'schema',
+                         b'Junk', b'Inbox', b'Sent', b'Deleted', b'Drafts',
+                         b'Microsoft', b'Exchange', b'System', b'Recovery',
+                         b'Calendar', b'Contacts', b'Tasks', b'Rule']
         candidates = []
         for i in range(len(blob) - 5):
-            if blob[i] not in (0x4d, 0x4b):  # M or K marker
+            if blob[i] != ord('M'):
                 continue
             length = blob[i + 1]
             if length < 2 or length > 100:
                 continue
             if i + 2 + length > len(blob):
                 continue
-            potential = blob[i + 2:i + 2 + length]
+            content = blob[i + 2:i + 2 + length]
             # All bytes must be printable ASCII
-            if not all(32 <= b < 127 for b in potential):
+            if not all(32 <= b < 127 for b in content):
                 continue
-            text = potential.decode('ascii', errors='ignore')
+            # Skip emails, Message-IDs, system strings
+            if b'@' in content or content.startswith(b'<'):
+                continue
+            if any(p in content for p in skip_patterns):
+                continue
+            text = content.decode('ascii', errors='ignore')
             if len(text) < 2:
                 continue
-            # Skip Message-IDs
-            if text.startswith('<'):
-                continue
-            # Skip system strings
-            if any(w in text.lower() for w in skip_words):
+            # Skip if it matches the sender name (we want the NEXT entry)
+            if sender_name and text == sender_name:
                 continue
             candidates.append(text)
 
-        # Subject is typically the second candidate (after sender name)
-        if len(candidates) >= 2:
-            return candidates[1]
-        elif len(candidates) == 1:
+        # First candidate after filtering out sender is likely the subject
+        if candidates:
             return candidates[0]
 
         return ""
@@ -814,14 +826,12 @@ class EmailExtractor:
         if msg_class:
             msg.message_class = msg_class
 
-        # Extract subject and message_id from PropertyBlob
+        # Extract fields from PropertyBlob (sender first, then subject uses sender to locate)
         if prop_blob:
-            msg.subject = self._extract_subject(prop_blob)
-            msg.message_id = self._extract_message_id(prop_blob)
-
-            # Extract sender from PropertyBlob using M marker pattern
             msg.sender_name = self._extract_sender(prop_blob)
             msg.sender_email = self._extract_sender_email(prop_blob)
+            msg.subject = self._extract_subject(prop_blob, msg.sender_name)
+            msg.message_id = self._extract_message_id(prop_blob)
 
         # Extract recipient from DisplayTo column
         display_to = self._get_bytes(record, col_map.get('DisplayTo', -1))
