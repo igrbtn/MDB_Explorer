@@ -599,6 +599,9 @@ class EmailExtractor:
                     # Skip Exchange paths and system strings
                     if any(p in content for p in [b'/O=', b'/OU=', b'CN=', b'EX:', b'http', b'schema']):
                         continue
+                    # Skip if this is the sender name again
+                    if content == sender_bytes or content.rstrip(b'\x00') == sender_bytes:
+                        continue
 
                     # Check for repeat pattern encoding (AAAA BBBB style)
                     if self._looks_like_repeat_encoding(content):
@@ -607,6 +610,9 @@ class EmailExtractor:
                     # Extract as printable text
                     text = self._extract_printable_text(content)
                     if text and len(text) >= 2:
+                        # Double-check: skip if extracted text matches sender
+                        if text.strip() == sender_name.strip():
+                            continue
                         return text
 
         # Fallback: scan all M markers, skip known non-subject entries
