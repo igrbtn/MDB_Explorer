@@ -918,6 +918,7 @@ class EmailExtractor:
             recipient_names = self._extract_recipients_from_display_to(display_to)
             if recipient_names:
                 msg.to_names = recipient_names
+                # Domain will be updated below after sender email is fully resolved
                 msg.to_emails = [
                     f"{name.lower().replace(' ', '')}@unknown"
                     for name in recipient_names
@@ -965,6 +966,15 @@ class EmailExtractor:
             msg.sender_email = f"{msg.sender_name.lower().replace(' ', '')}@unknown"
         elif not msg.sender_email and self.mailbox_email:
             msg.sender_email = self.mailbox_email
+
+        # Use sender's email domain for recipient emails (same Exchange server)
+        if msg.sender_email and '@' in msg.sender_email and msg.to_emails:
+            domain = msg.sender_email.split('@')[1]
+            if domain and domain != 'unknown':
+                msg.to_emails = [
+                    e.replace('@unknown', f'@{domain}') if '@unknown' in e else e
+                    for e in msg.to_emails
+                ]
 
         # If no body found yet, try PropertyBlob
         if not msg.body_text and prop_blob:
