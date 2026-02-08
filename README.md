@@ -30,7 +30,7 @@ A Python GUI application for viewing and exporting emails from Microsoft Exchang
 ## Screenshots
 
 ### Main Interface
-![Main Page](screenshots/MainPage.png)
+![Main Page](screenshots/MainPage.png?v=2)
 
 ### Mailbox Picker
 ![Mailbox Picker](screenshots/MailboxPicker.png)
