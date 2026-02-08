@@ -57,7 +57,7 @@ A Python GUI application for viewing and exporting emails from Microsoft Exchang
 ```cmd
 git clone https://github.com/igrbtn/EDB_Explorer.git
 cd EDB_Explorer
-install_windows.bat
+install\install_windows.bat
 ```
 
 > **Note:** If installation fails, you may need [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (select "Desktop development with C++").
@@ -68,8 +68,8 @@ install_windows.bat
 ```bash
 git clone https://github.com/igrbtn/EDB_Explorer.git
 cd EDB_Explorer
-chmod +x install_mac.sh
-./install_mac.sh
+chmod +x install/install_mac.sh
+./install/install_mac.sh
 ```
 
 ### Ubuntu/Debian
@@ -78,8 +78,8 @@ chmod +x install_mac.sh
 ```bash
 git clone https://github.com/igrbtn/EDB_Explorer.git
 cd EDB_Explorer
-chmod +x install_ubuntu.sh
-./install_ubuntu.sh
+chmod +x install/install_ubuntu.sh
+./install/install_ubuntu.sh
 ```
 
 ### Manual Installation
@@ -468,7 +468,7 @@ Access via pyesedb:
 
 # Key Modules
 
-## `email_message.py`
+## `exporters/email_message.py`
 
 **Classes:**
 - `EmailMessage` - dataclass for email data (subject, from, to, body, attachments)
@@ -481,7 +481,7 @@ Access via pyesedb:
 - `_extract_subject(blob)` - Extract subject from PropertyBlob
 - `to_eml()` - Export to EML format
 
-## `calendar_message.py`
+## `exporters/calendar_message.py`
 
 **Classes:**
 - `CalendarEvent` - dataclass for calendar events
@@ -494,7 +494,7 @@ Access via pyesedb:
 - `to_ics()` - Export to iCalendar format
 - `export_calendar_to_ics(events, path)` - Export multiple events
 
-## `lzxpress.py`
+## `core/lzxpress.py`
 
 **Functions:**
 - `decompress_exchange_body(data)` - Decompress NativeBody HTML
