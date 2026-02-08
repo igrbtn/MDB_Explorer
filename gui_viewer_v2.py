@@ -1167,18 +1167,6 @@ class MainWindow(QMainWindow):
         self.export_eml_btn2.setStyleSheet("QPushButton { padding: 4px 12px; font-weight: bold; background-color: #094771; color: #ffffff; border: 1px solid #007acc; }")
         right_export_layout.addWidget(self.export_eml_btn2)
 
-        self.export_calendar_btn = QPushButton("Export Calendar (.ics)")
-        self.export_calendar_btn.clicked.connect(self._on_export_calendar)
-        self.export_calendar_btn.setEnabled(False)
-        self.export_calendar_btn.setToolTip("Export calendar items from this folder to .ics file")
-        right_export_layout.addWidget(self.export_calendar_btn)
-
-        self.export_contacts_btn = QPushButton("Export Contacts (.vcf)")
-        self.export_contacts_btn.clicked.connect(self._on_export_contacts)
-        self.export_contacts_btn.setEnabled(False)
-        self.export_contacts_btn.setToolTip("Export contacts from this folder to .vcf file")
-        right_export_layout.addWidget(self.export_contacts_btn)
-
         self.export_attach_btn = QPushButton("Export Attachments")
         self.export_attach_btn.clicked.connect(self._on_export_attachments)
         self.export_attach_btn.setEnabled(False)
@@ -1916,8 +1904,6 @@ class MainWindow(QMainWindow):
         self.message_list.clear()
         self.all_messages_cache = []
         self.export_folder_btn.setEnabled(False)
-        self.export_calendar_btn.setEnabled(False)
-        self.export_contacts_btn.setEnabled(False)
         self.export_eml_btn2.setEnabled(False)
         self.export_attach_btn.setEnabled(False)
 
@@ -1929,8 +1915,6 @@ class MainWindow(QMainWindow):
         folder_id = items[0].data(0, Qt.ItemDataRole.UserRole)
         self.current_folder_id = folder_id
         self.export_folder_btn.setEnabled(True)
-        self.export_calendar_btn.setEnabled(HAS_CALENDAR_MODULE)
-        self.export_contacts_btn.setEnabled(True)
         message_indices = self.messages_by_folder.get(folder_id, [])
 
         if not message_indices:
