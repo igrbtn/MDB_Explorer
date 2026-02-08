@@ -7,17 +7,25 @@ A Python GUI application for viewing and exporting emails from Microsoft Exchang
 - **Dark mode UI** consistent across Windows and macOS
 - **Database statistics** displayed after loading (size, mailboxes, messages, tables)
 - **Browse mailbox folder structure** with proper folder names
-- **View messages** with From, To, Cc, Bcc, Subject, Date fields
+- **View emails** with From, To, Cc, Bcc, Subject, Date fields
+- **View calendar events** with Organizer, Attendees, Location, Start Time
+- **View contacts** with Name, Email, Phone, Company, Title
 - **Display email body** (text and HTML views with white background for readability)
 - **Extract and save attachments** (including large Long Value attachments)
-- **Export emails as EML format** (with body, headers, and attachments)
-- **Export entire folders** to EML files
+- **Smart export button** adapts to message type:
+  - Email → EML format (RFC 2822 with body, headers, attachments)
+  - Calendar → ICS format (iCalendar with event details)
+  - Contact → VCF format (vCard 3.0 importable by Outlook/Gmail/Apple)
+- **Export entire folders** to EML files (with attachments)
 - **Export entire mailbox** with date/subject/sender filters
-- **Export calendar items** to iCalendar (.ics) format
+- **Bulk export contacts** from folder to single .vcf file
+- **Bulk export calendar** from folder to single .ics file
 - **Search and filter** messages by subject, from, to, read status, attachments
+- **Performance profiler** (debug mode via About dialog) with CSV export
 - **Mailbox owner detection** from Mailbox table (properly decompressed)
 - **Multi-encoding support** (UTF-8, Cyrillic Windows-1251, KOI8-R, etc.)
 - **Hidden/system items toggle** in filter bar
+- **Optimized performance** with per-mailbox caching and lazy attachment loading
 
 ## Screenshots
 
@@ -47,8 +55,8 @@ A Python GUI application for viewing and exporting emails from Microsoft Exchang
 
 2. Clone and run install script:
 ```cmd
-git clone https://github.com/igrbtn/MDB_Explorer.git
-cd MDB_Explorer
+git clone https://github.com/igrbtn/EDB_Explorer.git
+cd EDB_Explorer
 install_windows.bat
 ```
 
@@ -58,8 +66,8 @@ install_windows.bat
 
 1. Run install script (installs Homebrew and Python if needed):
 ```bash
-git clone https://github.com/igrbtn/MDB_Explorer.git
-cd MDB_Explorer
+git clone https://github.com/igrbtn/EDB_Explorer.git
+cd EDB_Explorer
 chmod +x install_mac.sh
 ./install_mac.sh
 ```
@@ -68,8 +76,8 @@ chmod +x install_mac.sh
 
 1. Run install script:
 ```bash
-git clone https://github.com/igrbtn/MDB_Explorer.git
-cd MDB_Explorer
+git clone https://github.com/igrbtn/EDB_Explorer.git
+cd EDB_Explorer
 chmod +x install_ubuntu.sh
 ./install_ubuntu.sh
 ```
@@ -172,11 +180,11 @@ python cli.py database.edb export-calendar -m 103 -o calendar.ics
 ├─────────────┬───────────────────────┬───────────────────────────────┤
 │  Left Panel │    Middle Panel       │      Right Panel              │
 │             │                       │                               │
-│ [Exp Folder]│ Search: [___] Status  │ [Exp EML] [Cal] [Attach]     │
-│ [Exp Mbox]  │ [All] Has Attach      │                               │
-│             │ Hidden Clear          │ From:    (value)              │
-│ Folder Tree │                       │ To:      (value)              │
-│ - Inbox     │ # Date From To Subj   │ Subject: (value)              │
+│ [Exp Folder]│ Search: [___] Status  │ [Export .eml/.ics/.vcf][Attach]│
+│ [Exp Mbox]  │ [All] Has Attach      │  (adapts to message type)     │
+│             │ Hidden Clear          │ From:    (value)  ← or        │
+│ Folder Tree │                       │ To:      (value)  Organizer/  │
+│ - Inbox     │ # Date From To Subj   │ Subject: (value)  Name/etc   │
 │ - Sent      │ 1 2026 Admin...       │ Date:    (value)              │
 │ - Drafts    │ 2 2026 User...        │                               │
 │ - Deleted   │                       │ [Body Text][HTML][Attach]...  │
@@ -213,14 +221,15 @@ edb_exporter/
 ```
 EDB File → pyesedb → Tables Dict → Folder/Message Indexing → GUI Display
                                           ↓
-                    ┌─────────────────────┴─────────────────────┐
-                    ↓                                           ↓
-          Attachment extraction                          Body extraction
-          (Long Value B+ tree)                     (LZXPRESS decompression)
-                    ↓                                           ↓
-              EML Export                              HTML/Text Display
-                    ↓
-            Calendar ICS Export
+                    ┌─────────────────────┼─────────────────────┐
+                    ↓                     ↓                     ↓
+          Attachment extraction    Body extraction       Type detection
+          (Long Value B+ tree)  (LZXPRESS decompress)   (MessageClass)
+                    ↓                     ↓                     ↓
+              EML Export          HTML/Text Display    ┌────────┼────────┐
+                                                      ↓        ↓        ↓
+                                                    Email   Calendar  Contact
+                                                    (.eml)  (.ics)    (.vcf)
 ```
 
 ---
