@@ -238,6 +238,49 @@ class EmailMessage:
 
         return "\n".join(lines)
 
+    def to_pst_dict(self) -> dict:
+        """Convert to dict for PSTFileBuilder.add_message()."""
+        try:
+            from eml2pst.utils import datetime_to_filetime
+        except ImportError:
+            return {}
+
+        recipients = []
+        for i, email in enumerate(self.to_emails):
+            name = self.to_names[i] if i < len(self.to_names) else email
+            recipients.append({'name': name, 'email': email, 'recipient_type': 1})
+        for i, email in enumerate(self.cc_emails):
+            name = self.cc_names[i] if i < len(self.cc_names) else email
+            recipients.append({'name': name, 'email': email, 'recipient_type': 2})
+        for i, email in enumerate(self.bcc_emails):
+            name = self.bcc_names[i] if i < len(self.bcc_names) else email
+            recipients.append({'name': name, 'email': email, 'recipient_type': 3})
+
+        attachments = []
+        for a in self.attachments:
+            if a.data:
+                attachments.append({
+                    'filename': a.filename, 'data': a.data,
+                    'mime_type': a.content_type, 'size': a.size,
+                })
+
+        return {
+            'subject': self.subject or '',
+            'body_text': self.body_text or None,
+            'body_html': self.body_html or None,
+            'message_class': self.message_class,
+            'sender_name': self.sender_name,
+            'sender_email': self.sender_email,
+            'delivery_time': datetime_to_filetime(self.date_received) if self.date_received else None,
+            'submit_time': datetime_to_filetime(self.date_sent) if self.date_sent else None,
+            'importance': self.importance,
+            'priority': 0,
+            'sensitivity': self.sensitivity,
+            'has_attachments': bool(self.attachments),
+            'recipients': recipients,
+            'attachments': attachments,
+        }
+
 
 class EmailExtractor:
     """

@@ -134,6 +134,13 @@ except ImportError:
     HAS_CALENDAR_MODULE = False
     CALENDAR_MESSAGE_CLASSES = []
 
+# Import PST export module
+try:
+    from eml2pst.pst_file import PSTFileBuilder
+    HAS_PST_MODULE = True
+except ImportError:
+    HAS_PST_MODULE = False
+
 
 # Supported encodings for text extraction
 # ASCII/UTF-8 encodings (for standard text)
@@ -2929,8 +2936,70 @@ a {{ color: #0066cc; }}
         self.status.showMessage(msg)
         QMessageBox.information(self, "Export", f"Saved {saved} attachments to:\n{output_dir}\n\n{skipped} external references skipped" if skipped else f"Saved {saved} attachments to:\n{output_dir}")
 
+    def _export_to_pst(self, output_path, messages_with_folders, display_name):
+        """Export messages to a single PST file.
+
+        Args:
+            output_path: Path for the output .pst file
+            messages_with_folders: list of (email_msg, folder_path_str) tuples
+            display_name: PST store display name
+        """
+        builder = PSTFileBuilder(display_name=display_name)
+        folder_nids = {}  # folder_path → nid
+
+        for email_msg, folder_path in messages_with_folders:
+            # Create folder hierarchy on demand
+            if folder_path not in folder_nids:
+                parts = folder_path.split('/')
+                current_path = ''
+                parent_nid = None
+                for part in parts:
+                    current_path = f"{current_path}/{part}" if current_path else part
+                    if current_path not in folder_nids:
+                        folder_nids[current_path] = builder.add_folder(part, parent_nid)
+                    parent_nid = folder_nids[current_path]
+
+            try:
+                builder.add_message(folder_nids[folder_path], email_msg.to_pst_dict())
+            except Exception as e:
+                print(f"Warning: failed to add message {email_msg.record_index} to PST: {e}")
+
+        builder.write(output_path)
+
+    def _ask_export_format(self):
+        """Show format selector dialog. Returns 'eml' or 'pst', or None if cancelled."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Export Format")
+        dialog.setMinimumWidth(300)
+        layout = QVBoxLayout(dialog)
+
+        group = QGroupBox("Select export format")
+        group_layout = QVBoxLayout(group)
+
+        eml_radio = QRadioButton("EML files (individual .eml per message)")
+        eml_radio.setChecked(True)
+        group_layout.addWidget(eml_radio)
+
+        pst_radio = QRadioButton("PST file (single Outlook-compatible file)")
+        pst_radio.setEnabled(HAS_PST_MODULE)
+        if not HAS_PST_MODULE:
+            pst_radio.setText("PST file (eml2pst module not found)")
+        group_layout.addWidget(pst_radio)
+
+        layout.addWidget(group)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+
+        return 'pst' if pst_radio.isChecked() else 'eml'
+
     def _on_export_folder(self):
-        """Export all messages in the current folder as EML files."""
+        """Export all messages in the current folder as EML files or PST."""
         profiler.start("Export Folder")
         items = self.folder_tree.selectedItems()
         if not items:
@@ -2947,10 +3016,25 @@ a {{ color: #0066cc; }}
             profiler.stop("Export Folder")
             return
 
-        output_dir = QFileDialog.getExistingDirectory(self, "Select Export Directory")
-        if not output_dir:
+        # Ask export format (EML or PST)
+        export_format = self._ask_export_format()
+        if not export_format:
             profiler.stop("Export Folder")
             return
+
+        if export_format == 'pst':
+            output_path, _ = QFileDialog.getSaveFileName(
+                self, "Save PST File", f"{folder_name}.pst", "PST Files (*.pst)")
+            if not output_path:
+                profiler.stop("Export Folder")
+                return
+            output_dir = None
+        else:
+            output_dir = QFileDialog.getExistingDirectory(self, "Select Export Directory")
+            if not output_dir:
+                profiler.stop("Export Folder")
+                return
+            output_path = None
 
         msg_table_name = f"Message_{self.current_mailbox}"
         msg_table = self.tables.get(msg_table_name)
@@ -2967,6 +3051,7 @@ a {{ color: #0066cc; }}
         exported_eml = 0
         exported_ics = 0
         exported_vcf = 0
+        pst_messages = []  # Collect messages for PST mode
         for idx, rec_idx in enumerate(message_indices):
             self.progress.setValue(idx + 1)
             QApplication.processEvents()
@@ -3000,8 +3085,8 @@ a {{ color: #0066cc; }}
                 subject = email_msg.subject if email_msg else ''
                 subject_safe = re.sub(r'[<>:"/\\|?*]', '_', subject or 'no_subject')[:50]
 
-                if is_cal:
-                    # Export as ICS
+                if is_cal and export_format == 'eml':
+                    # Export as ICS (EML mode only)
                     cal_event = self.calendar_extractor.extract_event(record, col_map, rec_idx)
                     if cal_event:
                         subject_safe = re.sub(r'[<>:"/\\|?*]', '_', cal_event.subject or 'event')[:50]
@@ -3010,8 +3095,8 @@ a {{ color: #0066cc; }}
                         with open(out_path, 'w', encoding='utf-8') as f:
                             f.write(cal_event.to_ics())
                         exported_ics += 1
-                elif is_vcf:
-                    # Export as VCF
+                elif is_vcf and export_format == 'eml':
+                    # Export as VCF (EML mode only)
                     contact = self._extract_contact_fields(email_msg, prop_blob)
                     vcard = self._build_vcard(contact)
                     if vcard:
@@ -3022,29 +3107,43 @@ a {{ color: #0066cc; }}
                             f.write(vcard)
                         exported_vcf += 1
                 elif email_msg:
-                    # Export as EML using EmailMessage.to_eml()
-                    filename = f"{date_str}_{rec_idx}_{subject_safe}.eml"
-                    eml_content = email_msg.to_eml()
-                    out_path = Path(output_dir) / filename
-                    with open(out_path, 'wb') as f:
-                        f.write(eml_content)
+                    if export_format == 'pst':
+                        pst_messages.append((email_msg, folder_name))
+                    else:
+                        # Export as EML using EmailMessage.to_eml()
+                        filename = f"{date_str}_{rec_idx}_{subject_safe}.eml"
+                        eml_content = email_msg.to_eml()
+                        out_path = Path(output_dir) / filename
+                        with open(out_path, 'wb') as f:
+                            f.write(eml_content)
                     exported_eml += 1
 
             except Exception as e:
                 self.status.showMessage(f"Error exporting record {rec_idx}: {e}")
 
         self.progress.setVisible(False)
+
+        # Write PST file if in PST mode
+        if export_format == 'pst' and pst_messages:
+            try:
+                self._export_to_pst(output_path, pst_messages, folder_name)
+            except Exception as e:
+                QMessageBox.critical(self, "Export Error", f"Failed to write PST: {e}")
+                profiler.stop("Export Folder")
+                return
+
         total = exported_eml + exported_ics + exported_vcf
         parts = []
         if exported_eml:
-            parts.append(f"{exported_eml} emails (.eml)")
+            parts.append(f"{exported_eml} emails ({'.pst' if export_format == 'pst' else '.eml'})")
         if exported_ics:
             parts.append(f"{exported_ics} events (.ics)")
         if exported_vcf:
             parts.append(f"{exported_vcf} contacts (.vcf)")
         detail = ", ".join(parts) if parts else "0 items"
-        self.status.showMessage(f"Exported {total} items to {output_dir}")
-        QMessageBox.information(self, "Export", f"Exported {detail} from {folder_name} to:\n{output_dir}")
+        out_location = output_path if export_format == 'pst' else output_dir
+        self.status.showMessage(f"Exported {total} items to {out_location}")
+        QMessageBox.information(self, "Export", f"Exported {detail} from {folder_name} to:\n{out_location}")
         profiler.stop("Export Folder")
 
     def _on_export_calendar(self):
@@ -3333,7 +3432,7 @@ a {{ color: #0066cc; }}
         return "/".join(path_parts)
 
     def _on_export_mailbox(self):
-        """Export entire mailbox with filters to folder structure with EML files."""
+        """Export entire mailbox with filters to EML files or PST."""
         profiler.start("Export Mailbox")
         if not self.current_mailbox:
             QMessageBox.warning(self, "Export", "No mailbox selected")
@@ -3394,6 +3493,19 @@ a {{ color: #0066cc; }}
 
         layout.addWidget(folder_group)
 
+        # Export format selection
+        format_group = QGroupBox("Export Format")
+        format_layout = QVBoxLayout(format_group)
+        eml_radio = QRadioButton("EML files (folder structure with individual files)")
+        eml_radio.setChecked(True)
+        format_layout.addWidget(eml_radio)
+        pst_radio = QRadioButton("PST file (single Outlook-compatible file)")
+        pst_radio.setEnabled(HAS_PST_MODULE)
+        if not HAS_PST_MODULE:
+            pst_radio.setText("PST file (eml2pst module not found)")
+        format_layout.addWidget(pst_radio)
+        layout.addWidget(format_group)
+
         # Buttons
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dialog.accept)
@@ -3411,16 +3523,24 @@ a {{ color: #0066cc; }}
         filter_to_text = to_filter.text().strip().lower()
         filter_subject_text = subject_filter.text().strip().lower()
         filter_include_hidden = include_hidden.isChecked()
+        export_format = 'pst' if pst_radio.isChecked() else 'eml'
 
-        # Select output directory
-        output_dir = QFileDialog.getExistingDirectory(self, "Select Export Directory")
-        if not output_dir:
-            return
-
-        # Create mailbox folder
+        # Select output location
         mailbox_name = self.mailbox_owner or f"Mailbox_{self.current_mailbox}"
-        mailbox_dir = Path(output_dir) / mailbox_name.replace(' ', '_')
-        mailbox_dir.mkdir(exist_ok=True)
+        if export_format == 'pst':
+            output_pst_path, _ = QFileDialog.getSaveFileName(
+                self, "Save PST File", f"{mailbox_name}.pst", "PST Files (*.pst)")
+            if not output_pst_path:
+                return
+            mailbox_dir = None
+        else:
+            output_dir = QFileDialog.getExistingDirectory(self, "Select Export Directory")
+            if not output_dir:
+                return
+            output_pst_path = None
+            # Create mailbox folder
+            mailbox_dir = Path(output_dir) / mailbox_name.replace(' ', '_')
+            mailbox_dir.mkdir(exist_ok=True)
 
         msg_table_name = f"Message_{self.current_mailbox}"
         msg_table = self.tables.get(msg_table_name)
@@ -3444,6 +3564,7 @@ a {{ color: #0066cc; }}
         exported_ics = 0
         exported_vcf = 0
         skipped = 0
+        pst_messages = []  # Collect messages for PST mode
 
         for i, (rec_idx, folder_id, folder_path_str) in enumerate(all_indices):
             self.progress.setValue(i + 1)
@@ -3501,14 +3622,14 @@ a {{ color: #0066cc; }}
                     skipped += 1
                     continue
 
-                # Create folder hierarchy directories (folder/subfolder/subfolder)
-                # Sanitize each path component
-                path_parts = folder_path_str.split('/')
-                safe_parts = [re.sub(r'[<>:"/\\|?*]', '_', part or 'Unknown') for part in path_parts]
-                folder_path = mailbox_dir
-                for part in safe_parts:
-                    folder_path = folder_path / part
-                folder_path.mkdir(parents=True, exist_ok=True)
+                # Create folder hierarchy directories (EML mode only)
+                if export_format == 'eml':
+                    path_parts = folder_path_str.split('/')
+                    safe_parts = [re.sub(r'[<>:"/\\|?*]', '_', part or 'Unknown') for part in path_parts]
+                    folder_path = mailbox_dir
+                    for part in safe_parts:
+                        folder_path = folder_path / part
+                    folder_path.mkdir(parents=True, exist_ok=True)
 
                 # Detect message type
                 msg_class = ''
@@ -3521,8 +3642,8 @@ a {{ color: #0066cc; }}
                 date_str = date_received.strftime("%Y%m%d_%H%M%S") if date_received else "nodate"
                 subject_safe = re.sub(r'[<>:"/\\|?*]', '_', email_msg.subject or 'no_subject')[:40]
 
-                if is_cal:
-                    # Export as ICS
+                if is_cal and export_format == 'eml':
+                    # Export as ICS (EML mode only)
                     cal_event = self.calendar_extractor.extract_event(record, col_map, rec_idx)
                     if cal_event:
                         filename = f"{date_str}_{rec_idx}_{subject_safe}.ics"
@@ -3530,8 +3651,8 @@ a {{ color: #0066cc; }}
                         with open(out_path, 'w', encoding='utf-8') as f:
                             f.write(cal_event.to_ics())
                         exported_ics += 1
-                elif is_vcf:
-                    # Export as VCF
+                elif is_vcf and export_format == 'eml':
+                    # Export as VCF (EML mode only)
                     contact = self._extract_contact_fields(email_msg, get_bytes_value(record, col_map.get('PropertyBlob', -1)))
                     vcard = self._build_vcard(contact)
                     if vcard:
@@ -3542,12 +3663,15 @@ a {{ color: #0066cc; }}
                             f.write(vcard)
                         exported_vcf += 1
                 else:
-                    # Export as EML
-                    filename = f"{date_str}_{rec_idx}_{subject_safe}.eml"
-                    eml_content = email_msg.to_eml()
-                    out_path = folder_path / filename
-                    with open(out_path, 'wb') as f:
-                        f.write(eml_content)
+                    if export_format == 'pst':
+                        pst_messages.append((email_msg, folder_path_str))
+                    else:
+                        # Export as EML
+                        filename = f"{date_str}_{rec_idx}_{subject_safe}.eml"
+                        eml_content = email_msg.to_eml()
+                        out_path = folder_path / filename
+                        with open(out_path, 'wb') as f:
+                            f.write(eml_content)
                     exported_eml += 1
 
             except Exception as e:
@@ -3555,23 +3679,33 @@ a {{ color: #0066cc; }}
 
         self.progress.setVisible(False)
 
+        # Write PST file if in PST mode
+        if export_format == 'pst' and pst_messages:
+            try:
+                self._export_to_pst(output_pst_path, pst_messages, mailbox_name)
+            except Exception as e:
+                QMessageBox.critical(self, "Export Error", f"Failed to write PST: {e}")
+                profiler.stop("Export Mailbox")
+                return
+
         # Summary
         total = exported_eml + exported_ics + exported_vcf
         parts = []
         if exported_eml:
-            parts.append(f"{exported_eml} emails (.eml)")
+            parts.append(f"{exported_eml} emails ({'.pst' if export_format == 'pst' else '.eml'})")
         if exported_ics:
             parts.append(f"{exported_ics} events (.ics)")
         if exported_vcf:
             parts.append(f"{exported_vcf} contacts (.vcf)")
         detail = ", ".join(parts) if parts else "0 items"
 
+        out_location = output_pst_path if export_format == 'pst' else mailbox_dir
         summary = f"Export complete!\n\n"
         summary += f"Exported: {detail}\n"
         summary += f"Skipped: {skipped} (filtered out)\n"
-        summary += f"Location: {mailbox_dir}"
+        summary += f"Location: {out_location}"
 
-        self.status.showMessage(f"Exported {total} items to {mailbox_dir}")
+        self.status.showMessage(f"Exported {total} items to {out_location}")
         QMessageBox.information(self, "Export Mailbox", summary)
         profiler.stop("Export Mailbox")
 
