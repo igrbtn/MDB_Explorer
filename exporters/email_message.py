@@ -567,116 +567,109 @@ class EmailExtractor:
 
     def _extract_subject(self, blob: bytes, sender_name: str = "") -> str:
         """
-        Extract subject from PropertyBlob using <sender_name>M pattern.
+        Extract subject from PropertyBlob using <SENDER_NAME_UPPERCASE>M/I pattern.
 
-        1. Find <sender_name>M in raw blob → extract printable chars (fast, works like old torM)
-        2. Find first non-system consecutive duplicate in decompressed M-entries (full text)
-        3. Return the longer result (raw blob can truncate compressed subjects)
+        In the decompressed PropertyBlob, Exchange stores the sender name in
+        UPPERCASE inside a CN path, directly followed by:
+        - M + length + ASCII/UTF-8 subject
+        - I + length + UTF-16-LE subject
+
+        The name may be truncated, so we try progressively shorter prefixes.
         """
         if not blob or len(blob) < 50:
             return ""
 
-        # Strategy 1: Find <sender_name>M in raw blob
-        raw_result = ""
-        if sender_name and len(sender_name) >= 2:
-            raw_result = self._extract_subject_from_raw_blob(blob, sender_name)
+        if not sender_name or len(sender_name) < 2:
+            return ""
 
-        # Strategy 2: Find first non-system consecutive duplicate in decompressed blob
-        dup_result = ""
+        import re
+
+        # Decompress blob
         try:
             from dissect.esedb.compression import decompress as dissect_decompress
             decompressed = dissect_decompress(blob)
         except:
             decompressed = blob
 
-        entries = []
-        i = 0
-        while i < len(decompressed) - 3:
-            if decompressed[i] == ord('M') and 2 <= decompressed[i + 1] <= 100:
-                length = decompressed[i + 1]
-                if i + 2 + length <= len(decompressed):
-                    entries.append(decompressed[i + 2:i + 2 + length])
-                    i += 2 + length
-                    continue
-            i += 1
+        sender_upper = sender_name.upper().encode('ascii', errors='ignore')
+        sender_lower = sender_name.lower()
 
-        for j in range(len(entries) - 1):
-            if entries[j] != entries[j + 1] or len(entries[j]) < 2:
-                continue
-            content = entries[j]
-            if not all(32 <= b <= 126 for b in content):
-                continue
-            lower = content.lower()
-            if any(w in lower for w in [b'fydib', b'recipients', b'cn=',
-                                         b'/o=', b'/ou=', b'nistrative',
-                                         b'administrative', b'indexing',
-                                         b'bigfunnel']):
-                continue
-            if b'@' in content or content.startswith(b'<'):
-                continue
-            if sender_name and content.decode('ascii', errors='ignore').strip().lower() == sender_name.lower():
-                continue
-            if self._looks_like_repeat_encoding(content):
-                dup_result = self._decode_repeat_pattern(bytes([len(content)]) + content)
-            else:
-                dup_result = content.decode('ascii', errors='ignore').strip()
-            break
+        # Try progressively shorter prefixes of the UPPERCASE sender name
+        for plen in range(len(sender_upper), 4, -1):
+            prefix = sender_upper[:plen]
+            for marker in [b'M', b'I']:
+                search_from = 0
+                while True:
+                    pos = decompressed.find(prefix + marker, search_from)
+                    if pos < 0:
+                        break
 
-        # Prefer decompressed (clean text), fall back to raw blob
-        return dup_result or raw_result
+                    after = pos + len(prefix) + 1  # byte after marker
+                    if after >= len(decompressed):
+                        break
 
-    def _extract_subject_from_raw_blob(self, blob: bytes, sender_name: str) -> str:
-        """Extract subject from raw blob by finding <sender_name>M pattern."""
-        sender_bytes = sender_name.encode('ascii', errors='ignore')
+                    length_byte = decompressed[after]
+                    if not (2 <= length_byte <= 100) or after + 1 + length_byte > len(decompressed):
+                        search_from = pos + 1
+                        continue
 
-        # Find sender name (or suffix) followed by M in raw blob
-        pos = -1
-        for slen in range(len(sender_bytes), max(2, len(sender_bytes) - 6), -1):
-            suffix = sender_bytes[-slen:]
-            idx = blob.find(suffix + b'M')
-            if idx >= 0:
-                pos = idx + slen + 1  # Position right after M
-                break
+                    content = decompressed[after + 1:after + 1 + length_byte]
 
-        if pos < 0 or pos >= len(blob) - 2:
-            return ""
+                    # Decode based on marker type
+                    if marker == b'I':
+                        # UTF-16-LE encoded subject
+                        text = content.decode('utf-16-le', errors='replace').strip()
+                    else:
+                        # ASCII or UTF-8 subject
+                        try:
+                            text = content.decode('utf-8', errors='strict').strip()
+                        except UnicodeDecodeError:
+                            # Not valid UTF-8, check if mostly printable ASCII
+                            if not all(32 <= b <= 126 for b in content):
+                                search_from = pos + 1
+                                continue
+                            text = content.decode('ascii', errors='ignore').strip()
 
-        # Skip length byte
-        subject_start = pos + 1
-        if subject_start >= len(blob):
-            return ""
+                    if not text or len(text) < 2:
+                        search_from = pos + 1
+                        continue
 
-        # Find end: HH marker or high control byte after 3+ chars
-        end_pos = min(subject_start + 100, len(blob))
-        hh_pos = blob.find(b'HH', subject_start)
-        if 0 < hh_pos < end_pos:
-            end_pos = hh_pos
-        for j in range(subject_start, min(subject_start + 100, len(blob))):
-            if blob[j] == 0x1a or (blob[j] >= 0x80 and j > subject_start + 3):
-                end_pos = min(end_pos, j)
-                break
+                    lower = text.lower()
 
-        # Extract printable characters (handles compression artifacts)
-        subject_bytes = blob[subject_start:end_pos]
-        parts = []
-        current = []
-        for k, b in enumerate(subject_bytes):
-            if 0x20 <= b <= 0x7e and b != ord('!'):
-                current.append(chr(b))
-            elif b == ord('!'):
-                if current:
-                    parts.append(''.join(current))
-                    current = []
-            elif b == 0x00 or b < 0x20:
-                if current:
-                    parts.append(''.join(current))
-                    current = []
-        if current:
-            parts.append(''.join(current))
+                    # Skip system paths
+                    if any(w in lower for w in ['fydib', 'recipients', 'cn=',
+                                                 '/o=', '/ou=', 'nistrative',
+                                                 'administrative', 'indexing',
+                                                 'bigfunnel']):
+                        search_from = pos + 1
+                        continue
 
-        result = ''.join(parts).strip()
-        if result and len(result) >= 2 and result.lower() != sender_name.lower():
-            return result
+                    # Skip sender name
+                    if lower == sender_lower:
+                        search_from = pos + 1
+                        continue
+
+                    # Skip emails and Message-IDs
+                    if '@' in text or text.startswith('<'):
+                        search_from = pos + 1
+                        continue
+
+                    # Skip CN identifiers (hex-dash-name)
+                    if re.match(r'^[0-9a-f]{20,}-', lower):
+                        search_from = pos + 1
+                        continue
+
+                    # Skip entries containing sender name
+                    if sender_lower in lower:
+                        search_from = pos + 1
+                        continue
+
+                    # Check for repeat pattern encoding
+                    if marker == b'M' and self._looks_like_repeat_encoding(content):
+                        return self._decode_repeat_pattern(bytes([len(content)]) + content)
+
+                    return text
+
         return ""
 
     def _extract_printable_text(self, data: bytes) -> str:
