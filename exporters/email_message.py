@@ -567,10 +567,13 @@ class EmailExtractor:
 
     def _extract_subject(self, blob: bytes, sender_name: str = "") -> str:
         """
-        Extract subject from PropertyBlob using three strategies:
-        1. Decompressed M-entries with sender matching
-        2. Raw blob: find <sender>M, extract printable chars after it
-        3. Position-based: skip system/email entries, skip first name (sender), take next
+        Extract subject from PropertyBlob.
+
+        Primary strategy: subject appears as the first non-system consecutive
+        duplicate pair in the decompressed M-entries. This is structural —
+        no sender name or hardcoded patterns needed.
+
+        Fallback: sender-based matching, raw blob extraction.
         """
         if not blob or len(blob) < 50:
             return ""
@@ -598,24 +601,34 @@ class EmailExtractor:
         if not entries:
             return ""
 
-        # Classify all entries
-        text_entries = []  # (index, content) - non-system, non-email entries
-        for idx, content in enumerate(entries):
-            if not content or len(content) < 2:
+        # Strategy 1: Find first non-system consecutive duplicate pair
+        for j in range(len(entries) - 1):
+            if entries[j] != entries[j + 1] or len(entries[j]) < 2:
                 continue
+            content = entries[j]
+            # Skip non-printable
             if not all(32 <= b <= 126 for b in content):
                 continue
+            # Skip system paths
             lower = content.lower()
             if any(w in lower for w in [b'fydib', b'recipients', b'cn=',
                                          b'/o=', b'/ou=', b'nistrative',
                                          b'administrative', b'indexing',
                                          b'bigfunnel']):
                 continue
+            # Skip emails and Message-IDs
             if b'@' in content or content.startswith(b'<'):
                 continue
-            text_entries.append((idx, content))
+            # Skip if it matches sender name (sender can also appear as dup)
+            if sender_name:
+                if content.decode('ascii', errors='ignore').strip().lower() == sender_name.lower():
+                    continue
+            # Found the subject
+            if self._looks_like_repeat_encoding(content):
+                return self._decode_repeat_pattern(bytes([len(content)]) + content)
+            return content.decode('ascii', errors='ignore').strip()
 
-        # Strategy 1: Sender-based — find sender in entries, take next text entry
+        # Strategy 2: Sender-based — find sender, take next non-system text entry
         if sender_name and len(sender_name) >= 2:
             sender_lower = sender_name.lower().encode('ascii', errors='ignore').strip()
             sender_idx = -1
@@ -629,33 +642,28 @@ class EmailExtractor:
                     break
 
             if sender_idx >= 0:
-                for entry_idx, content in text_entries:
-                    if entry_idx <= sender_idx:
+                for content in entries[sender_idx + 1:]:
+                    if len(content) < 2 or not all(32 <= b <= 126 for b in content):
+                        continue
+                    lower = content.lower()
+                    if any(w in lower for w in [b'fydib', b'cn=', b'/o=', b'nistrative',
+                                                 b'indexing', b'bigfunnel']):
+                        continue
+                    if b'@' in content or content.startswith(b'<'):
                         continue
                     text = content.decode('ascii', errors='ignore').strip()
                     if text.lower() == sender_name.lower():
-                        continue  # Skip sender name duplicates
+                        continue
                     if self._looks_like_repeat_encoding(content):
                         return self._decode_repeat_pattern(bytes([len(content)]) + content)
                     if len(text) >= 2:
                         return text
 
-        # Strategy 2: Raw blob — find <sender_name>M and extract printable chars
+        # Strategy 3: Raw blob — find <sender_name>M, extract printable chars
         if sender_name and len(sender_name) >= 3:
             result = self._extract_subject_from_raw_blob(blob, sender_name)
             if result:
                 return result
-
-        # Strategy 3: Position-based — first text entry is sender, second is subject
-        if len(text_entries) >= 2:
-            first_text = text_entries[0][1].decode('ascii', errors='ignore').strip()
-            second_content = text_entries[1][1]
-            second_text = second_content.decode('ascii', errors='ignore').strip()
-            # Only return if second entry differs from first (not another sender copy)
-            if second_text.lower() != first_text.lower() and len(second_text) >= 2:
-                if self._looks_like_repeat_encoding(second_content):
-                    return self._decode_repeat_pattern(bytes([len(second_content)]) + second_content)
-                return second_text
 
         return ""
 
@@ -709,7 +717,6 @@ class EmailExtractor:
             parts.append(''.join(current))
 
         result = ''.join(parts).strip()
-        # Validate: at least 2 chars, not the sender name
         if result and len(result) >= 2 and result.lower() != sender_name.lower():
             return result
         return ""
