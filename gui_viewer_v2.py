@@ -88,7 +88,7 @@ from PyQt6.QtWidgets import (
     QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
     QStatusBar, QMessageBox, QProgressBar, QMenu, QListWidget,
     QListWidgetItem, QCheckBox, QTextBrowser, QDialog, QFormLayout,
-    QDateEdit, QDialogButtonBox, QGridLayout
+    QDateEdit, QDialogButtonBox, QGridLayout, QRadioButton
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QDate
 from PyQt6.QtGui import QFont, QAction, QTextOption, QColor, QPalette, QIcon

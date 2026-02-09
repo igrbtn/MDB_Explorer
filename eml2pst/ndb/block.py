@@ -42,7 +42,12 @@ def pack_block(data: bytes, bid: int, ib: int) -> bytes:
     assert len(data) <= MAX_BLOCK_DATA, f"Block data too large: {len(data)}"
 
     cb = len(data)
-    w_sig = block_signature(ib, bid)
+    # Per [MS-PST] 2.2.2.8.1: internal blocks (XBLOCK/SLBLOCK, BID bit 1 set)
+    # MUST have wSig=0. Only leaf data blocks get a computed signature.
+    if bid & 0x02:
+        w_sig = 0
+    else:
+        w_sig = block_signature(ib, bid)
     crc = compute_crc(data)
 
     # BLOCKTRAILER: cb(2) + wSig(2) + dwCRC(4) + bid(8) = 16 bytes

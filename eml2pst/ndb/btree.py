@@ -146,25 +146,37 @@ def build_btree_pages(entries, ptype, alloc_bid_fn, alloc_offset_fn):
         page = build_btpage(entries, ptype, bid, c_level=0)
         return [(bid, offset, page)]
 
-    # Multi-level: split entries into leaf pages, then build interior root
+    # Multi-level B-tree: split into pages, build interior levels recursively
     pages = []
-    interior_entries = []
+    current_entries = entries
+    current_entry_size = entry_size
+    level = 0
 
-    for i in range(0, len(entries), max_per_page):
-        chunk = entries[i:i + max_per_page]
-        leaf_bid = alloc_bid_fn()
-        leaf_offset = alloc_offset_fn(leaf_bid)
-        leaf_page = build_btpage(chunk, ptype, leaf_bid, c_level=0)
-        pages.append((leaf_bid, leaf_offset, leaf_page))
+    while True:
+        max_per = ENTRIES_AREA // current_entry_size
+        next_level_entries = []
 
-        # Interior entry: key = first key in this leaf, BREF = (bid, offset)
-        first_key = struct.unpack('<Q', chunk[0][:8])[0]
-        interior_entries.append(pack_bt_entry(first_key, leaf_bid, leaf_offset))
+        for i in range(0, len(current_entries), max_per):
+            chunk = current_entries[i:i + max_per]
+            bid = alloc_bid_fn()
+            offset = alloc_offset_fn(bid)
+            page = build_btpage(chunk, ptype, bid, c_level=level)
+            pages.append((bid, offset, page))
 
-    # Build interior root page
-    root_bid = alloc_bid_fn()
-    root_offset = alloc_offset_fn(root_bid)
-    root_page = build_btpage(interior_entries, ptype, root_bid, c_level=1)
-    pages.append((root_bid, root_offset, root_page))
+            first_key = struct.unpack('<Q', chunk[0][:8])[0]
+            next_level_entries.append(pack_bt_entry(first_key, bid, offset))
 
-    return pages
+        level += 1
+        max_interior = ENTRIES_AREA // BTENTRY_SIZE
+
+        if len(next_level_entries) <= max_interior:
+            # All interior entries fit in one root page
+            root_bid = alloc_bid_fn()
+            root_offset = alloc_offset_fn(root_bid)
+            root_page = build_btpage(next_level_entries, ptype, root_bid, c_level=level)
+            pages.append((root_bid, root_offset, root_page))
+            return pages
+
+        # Need another interior level
+        current_entries = next_level_entries
+        current_entry_size = BTENTRY_SIZE

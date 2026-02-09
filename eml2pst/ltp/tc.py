@@ -7,7 +7,7 @@ See [MS-PST] 2.3.4.
 """
 
 import struct
-from .heap import HeapOnNode, HN_CLIENT_TC
+from .heap import HeapOnNode, HN_CLIENT_TC, MAX_HN_ALLOC
 from ..mapi.properties import (
     prop_id, prop_type, is_fixed_type, fixed_size,
     PT_LONG, PT_SHORT, PT_BOOLEAN, PT_SYSTIME, PT_UNICODE, PT_STRING8,
@@ -42,9 +42,12 @@ def build_tc_node(column_defs, rows):
               Values should be the appropriate Python type.
 
     Returns:
-        Raw bytes for the TC data block.
+        Tuple of (pages, subnodes) where:
+            pages: List of bytes objects (HN pages, one per data block)
+            subnodes: List of (nid, data_bytes) for row data > MAX_HN_ALLOC
     """
     hn = HeapOnNode(client_sig=HN_CLIENT_TC)
+    subnodes = []
 
     # Filter out PidTagLtpRowId if caller passed it — we always add it ourselves
     column_defs = [t for t in column_defs if t != PidTagLtpRowId]
@@ -206,15 +209,24 @@ def build_tc_node(column_defs, rows):
         row_bytes[ceb_offset:ceb_offset + ceb_size] = ceb
         all_row_data += bytes(row_bytes)
 
-    # Allocate row data on heap (or store as HNID)
+    # Allocate row data on heap, or as subnode if too large
+    # Per [MS-PST] 2.3.4.4, hnidRows is an HNID — either HID or NID
+    _NID_TYPE_LTP = 0x1F
     if all_row_data:
-        rows_hid = hn.allocate(all_row_data)
+        if len(all_row_data) > MAX_HN_ALLOC:
+            # Store as subnode — NID with non-zero nidType
+            rows_nid = _NID_TYPE_LTP
+            subnodes.append((rows_nid, all_row_data))
+            rows_hid = rows_nid
+        else:
+            rows_hid = hn.allocate(all_row_data)
     else:
         rows_hid = 0
 
     # Build Row Index BTH: maps dwRowID (4 bytes) → row index (4 bytes)
     # Required by [MS-PST] 2.3.4.3 for row lookup
-    row_index_hid = 0
+    # Always create a valid BTH, even for empty TCs (libpff requires it)
+    ri_leaf_hid = 0
     if rows:
         # Collect (dwRowID, row_index) pairs, sorted by dwRowID
         ri_pairs = []
@@ -230,10 +242,10 @@ def build_tc_node(column_defs, rows):
 
         ri_leaf_hid = hn.allocate(ri_leaf_data)
 
-        # BTHHEADER: bType(1)=0xB5, cbKey(1)=4, cbEnt(1)=4, bIdxLevels(1)=0, hidRoot(4)
-        ri_bth_header = struct.pack('<BB BB I',
-                                     0xB5, 4, 4, 0, ri_leaf_hid)
-        row_index_hid = hn.allocate(ri_bth_header)
+    # BTHHEADER: bType(1)=0xB5, cbKey(1)=4, cbEnt(1)=4, bIdxLevels(1)=0, hidRoot(4)
+    ri_bth_header = struct.pack('<BB BB I',
+                                 0xB5, 4, 4, 0, ri_leaf_hid)
+    row_index_hid = hn.allocate(ri_bth_header)
 
     # Build TCINFO header
     tcinfo = struct.pack('<BB HHHH I I I',
@@ -253,4 +265,4 @@ def build_tc_node(column_defs, rows):
     tcinfo_hid = hn.allocate(tcinfo_data)
     hn.set_user_root(tcinfo_hid)
 
-    return hn.build()
+    return hn.build(), subnodes

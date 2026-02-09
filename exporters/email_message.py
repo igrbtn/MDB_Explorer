@@ -241,7 +241,7 @@ class EmailMessage:
     def to_pst_dict(self) -> dict:
         """Convert to dict for PSTFileBuilder.add_message()."""
         try:
-            from eml2pst.utils import datetime_to_filetime
+            from eml2pst.utils import datetime_to_filetime, filetime_now
         except ImportError:
             return {}
 
@@ -264,6 +264,11 @@ class EmailMessage:
                     'mime_type': a.content_type, 'size': a.size,
                 })
 
+        # Ensure FILETIME values are always valid integers (not None)
+        now = filetime_now()
+        delivery_time = datetime_to_filetime(self.date_received) if self.date_received else now
+        submit_time = datetime_to_filetime(self.date_sent) if self.date_sent else delivery_time
+
         return {
             'subject': self.subject or '',
             'body_text': self.body_text or None,
@@ -271,8 +276,8 @@ class EmailMessage:
             'message_class': self.message_class,
             'sender_name': self.sender_name,
             'sender_email': self.sender_email,
-            'delivery_time': datetime_to_filetime(self.date_received) if self.date_received else None,
-            'submit_time': datetime_to_filetime(self.date_sent) if self.date_sent else None,
+            'delivery_time': delivery_time,
+            'submit_time': submit_time,
             'importance': self.importance,
             'priority': 0,
             'sensitivity': self.sensitivity,

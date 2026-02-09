@@ -14,6 +14,19 @@ from .utils import datetime_to_filetime
 from .mapi.properties import MAPI_TO, MAPI_CC, MAPI_BCC
 
 
+def parse_eml_bytes(data):
+    """Parse raw EML bytes and extract properties for PST message creation.
+
+    Args:
+        data: Raw EML content as bytes.
+
+    Returns:
+        Same dict as parse_eml_file().
+    """
+    msg = email.message_from_bytes(data, policy=email.policy.compat32)
+    return _parse_message(msg)
+
+
 def parse_eml_file(filepath):
     """Parse an EML file and extract properties for PST message creation.
 
@@ -31,7 +44,11 @@ def parse_eml_file(filepath):
     filepath = Path(filepath)
     with open(filepath, 'rb') as f:
         msg = email.message_from_binary_file(f, policy=email.policy.compat32)
+    return _parse_message(msg)
 
+
+def _parse_message(msg):
+    """Extract properties from a parsed email.Message object."""
     result = {
         'subject': (msg.get('Subject') or '(No Subject)'),
         'message_class': 'IPM.Note',
