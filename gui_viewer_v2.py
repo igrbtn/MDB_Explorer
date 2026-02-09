@@ -1996,13 +1996,18 @@ class MainWindow(QMainWindow):
         profiler.start("SM: Extract Email")
         email_msg = None
         if HAS_EMAIL_MODULE and self.email_extractor:
-            email_msg = self.email_extractor.extract_message(
-                record, col_map, rec_idx,
-                folder_name=folder_name,
-                tables=self.tables,
-                mailbox_num=self.current_mailbox
-            )
-            self.current_email_message = email_msg
+            try:
+                email_msg = self.email_extractor.extract_message(
+                    record, col_map, rec_idx,
+                    folder_name=folder_name,
+                    tables=self.tables,
+                    mailbox_num=self.current_mailbox
+                )
+                self.current_email_message = email_msg
+            except Exception as e:
+                print(f"Warning: extract_message failed for record {rec_idx}: {e}")
+                import traceback
+                traceback.print_exc()
         profiler.stop("SM: Extract Email")
 
         # === Detect message type (use CalendarExtractor for proper LZXPRESS decompression) ===
