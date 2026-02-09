@@ -73,6 +73,21 @@ def _parse_message(msg):
         result['sender_name'] = parsed[0] or parsed[1]
         result['sender_email'] = parsed[1]
 
+    # If sender_email is not a valid SMTP address (no @), try alternatives
+    if result['sender_email'] and '@' not in result['sender_email']:
+        for alt_header in ('Return-Path', 'Sender', 'Reply-To'):
+            alt = msg.get(alt_header) or ''
+            if alt:
+                _, alt_addr = email.utils.parseaddr(alt)
+                if alt_addr and '@' in alt_addr:
+                    result['sender_email'] = alt_addr
+                    if not result['sender_name']:
+                        result['sender_name'] = _ or alt_addr
+                    break
+        # MAILER-DAEMON or other non-SMTP placeholder — clear it
+        if '@' not in result.get('sender_email', ''):
+            result['sender_email'] = ''
+
     # Parse date
     date_header = msg.get('Date') or ''
     if date_header:
@@ -103,9 +118,14 @@ def _parse_message(msg):
             addrs = email.utils.getaddresses([addr_header])
             for name, addr in addrs:
                 if addr:
+                    # If addr has no @, it's a bare display name (e.g. "To: Administrator")
+                    if '@' in addr:
+                        recip_email = addr
+                    else:
+                        recip_email = ''
                     result['recipients'].append({
                         'name': name or addr,
-                        'email': addr,
+                        'email': recip_email,
                         'recipient_type': rtype,
                     })
 

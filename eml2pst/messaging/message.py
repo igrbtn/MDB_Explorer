@@ -102,11 +102,17 @@ def build_message_pc(parsed_eml):
     if sender_name:
         props.append((PR_SENDER_NAME, sender_name))
         props.append((PR_SENT_REPRESENTING_NAME, sender_name))
-    if sender_email:
+    if sender_email and '@' in sender_email:
         props.append((PR_SENDER_EMAIL_ADDRESS, sender_email))
         props.append((PR_SENDER_ADDRTYPE, 'SMTP'))
         props.append((PR_SENT_REPRESENTING_EMAIL, sender_email))
         props.append((PR_SENT_REPRESENTING_ADDRTYPE, 'SMTP'))
+    elif sender_name:
+        # No SMTP address — use display name as email address with EX type
+        props.append((PR_SENDER_EMAIL_ADDRESS, sender_name))
+        props.append((PR_SENDER_ADDRTYPE, 'EX'))
+        props.append((PR_SENT_REPRESENTING_EMAIL, sender_name))
+        props.append((PR_SENT_REPRESENTING_ADDRTYPE, 'EX'))
 
     return build_pc_node(props)
 
@@ -131,11 +137,21 @@ def build_recipients_tc(recipients):
 
     rows = []
     for i, recip in enumerate(recipients):
+        recip_email = recip.get('email', '')
+        recip_name = recip.get('name', recip_email)
+        # Use EX addrtype for recipients without SMTP email
+        if recip_email and '@' in recip_email:
+            addrtype = 'SMTP'
+        else:
+            addrtype = 'EX'
+            # Use display name as email fallback so Outlook shows something
+            if not recip_email:
+                recip_email = recip_name
         row = {
             '_nid': i,
-            PR_DISPLAY_NAME_W: recip.get('name', recip.get('email', '')),
-            PR_EMAIL_ADDRESS: recip.get('email', ''),
-            PR_ADDRTYPE: 'SMTP',
+            PR_DISPLAY_NAME_W: recip_name,
+            PR_EMAIL_ADDRESS: recip_email,
+            PR_ADDRTYPE: addrtype,
             PR_RECIPIENT_TYPE: recip.get('recipient_type', MAPI_TO),
             PR_ROWID: i,
         }

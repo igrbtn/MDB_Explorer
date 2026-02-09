@@ -211,13 +211,15 @@ def build_tc_node(column_defs, rows):
 
     # Allocate row data on heap, or as subnode if too large
     # Per [MS-PST] 2.3.4.4, hnidRows is an HNID — either HID or NID
+    # NID must have nidIndex > 0: (index << 5) | nidType
     _NID_TYPE_LTP = 0x1F
+    _ROWS_SUBNODE_NID = (1 << 5) | _NID_TYPE_LTP  # 0x3F — nidIndex=1
     if all_row_data:
         if len(all_row_data) > MAX_HN_ALLOC:
-            # Store as subnode — NID with non-zero nidType
-            rows_nid = _NID_TYPE_LTP
-            subnodes.append((rows_nid, all_row_data))
-            rows_hid = rows_nid
+            # Store as subnode — NID with non-zero nidType and nidIndex
+            # Pass row_size so XBLOCK chunking aligns to row boundaries
+            subnodes.append((_ROWS_SUBNODE_NID, all_row_data, row_size))
+            rows_hid = _ROWS_SUBNODE_NID
         else:
             rows_hid = hn.allocate(all_row_data)
     else:
@@ -227,6 +229,7 @@ def build_tc_node(column_defs, rows):
     # Required by [MS-PST] 2.3.4.3 for row lookup
     # Always create a valid BTH, even for empty TCs (libpff requires it)
     ri_leaf_hid = 0
+    bth_levels = 0
     if rows:
         # Collect (dwRowID, row_index) pairs, sorted by dwRowID
         ri_pairs = []
@@ -236,15 +239,38 @@ def build_tc_node(column_defs, rows):
         ri_pairs.sort(key=lambda x: x[0])
 
         # Pack leaf entries: key(4) + data(4) per entry
-        ri_leaf_data = b''
-        for rid, ridx in ri_pairs:
-            ri_leaf_data += struct.pack('<I', rid) + struct.pack('<I', ridx)
+        ri_leaf_data = b''.join(
+            struct.pack('<II', rid, ridx) for rid, ridx in ri_pairs
+        )
 
-        ri_leaf_hid = hn.allocate(ri_leaf_data)
+        entry_size = 8  # key(4) + data(4)
+        max_per_leaf = MAX_HN_ALLOC // entry_size
 
-    # BTHHEADER: bType(1)=0xB5, cbKey(1)=4, cbEnt(1)=4, bIdxLevels(1)=0, hidRoot(4)
+        if len(ri_pairs) <= max_per_leaf:
+            # Single-level BTH (fits in one leaf)
+            ri_leaf_hid = hn.allocate(ri_leaf_data)
+        else:
+            # Multi-level BTH: split into leaf pages, build interior
+            # Per [MS-PST] 2.3.2.2: interior entries are key(cbKey) + hidChild(4)
+            leaf_hids = []
+            for i in range(0, len(ri_pairs), max_per_leaf):
+                chunk_pairs = ri_pairs[i:i + max_per_leaf]
+                chunk_data = b''.join(
+                    struct.pack('<II', rid, ridx) for rid, ridx in chunk_pairs
+                )
+                first_key = chunk_pairs[0][0]
+                leaf_hids.append((first_key, hn.allocate(chunk_data)))
+
+            # Interior node: key(4) + hidChild(4) per leaf
+            interior_data = b''.join(
+                struct.pack('<II', first_key, hid) for first_key, hid in leaf_hids
+            )
+            ri_leaf_hid = hn.allocate(interior_data)
+            bth_levels = 1
+
+    # BTHHEADER: bType(1)=0xB5, cbKey(1)=4, cbEnt(1)=4, bIdxLevels(1), hidRoot(4)
     ri_bth_header = struct.pack('<BB BB I',
-                                 0xB5, 4, 4, 0, ri_leaf_hid)
+                                 0xB5, 4, 4, bth_levels, ri_leaf_hid)
     row_index_hid = hn.allocate(ri_bth_header)
 
     # Build TCINFO header

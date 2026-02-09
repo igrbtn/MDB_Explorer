@@ -145,13 +145,22 @@ class PSTFileBuilder:
             total += len(page)
         return self._store_internal_block(build_xblock(bids, total))
 
-    def _store_subnode_data(self, data):
-        """Store subnode data. Small -> leaf BID, large -> chunked + XBLOCK internal BID."""
+    def _store_subnode_data(self, data, align=0):
+        """Store subnode data. Small -> leaf BID, large -> chunked + XBLOCK internal BID.
+
+        Args:
+            data: Raw bytes to store.
+            align: If >0, align chunk boundaries to this size (e.g. row_size for TC row data).
+                   libpff indexes rows per-block, so each block must start at a row boundary.
+        """
         if len(data) <= MAX_BLOCK_DATA:
             return self._store_data_block(data)
+        chunk_size = MAX_BLOCK_DATA
+        if align > 0:
+            chunk_size = (MAX_BLOCK_DATA // align) * align
         bids = []
-        for i in range(0, len(data), MAX_BLOCK_DATA):
-            bids.append(self._store_data_block(data[i:i + MAX_BLOCK_DATA]))
+        for i in range(0, len(data), chunk_size):
+            bids.append(self._store_data_block(data[i:i + chunk_size]))
         return self._store_internal_block(build_xblock(bids, len(data)))
 
     def _build_sl_bid(self, sl_entries):
@@ -165,7 +174,11 @@ class PSTFileBuilder:
         data_bid = self._store_node_pages(pages)
         sub_bid = 0
         if subnodes:
-            sl = [(sn, self._store_subnode_data(sd), 0) for sn, sd in subnodes]
+            sl = []
+            for sn_tuple in subnodes:
+                sn_nid, sn_data = sn_tuple[0], sn_tuple[1]
+                sn_align = sn_tuple[2] if len(sn_tuple) > 2 else 0
+                sl.append((sn_nid, self._store_subnode_data(sn_data, align=sn_align), 0))
             sub_bid = self._build_sl_bid(sl)
         return data_bid, sub_bid
 
@@ -183,8 +196,10 @@ class PSTFileBuilder:
 
         sl_entries = list(extra_sl_entries or [])
         if subnodes:
-            for sub_nid, sub_data in subnodes:
-                sub_bid = self._store_subnode_data(sub_data)
+            for sn_tuple in subnodes:
+                sub_nid, sub_data = sn_tuple[0], sn_tuple[1]
+                sub_align = sn_tuple[2] if len(sn_tuple) > 2 else 0
+                sub_bid = self._store_subnode_data(sub_data, align=sub_align)
                 sl_entries.append((sub_nid, sub_bid, 0))
 
         sub_bid = self._build_sl_bid(sl_entries)
